@@ -16,6 +16,10 @@
 
 这个"中档走检索"的偏移是个刻意的工程选择：**误判的代价不对称**。
 让模型在不确定时多查一次资料，比让它自信地胡说便宜得多。
+
+还有第四条规则，是实测之后补的：
+  出口是 refuse / clarify（"不查资料"的那两个）时，**门槛要单独抬到 0.90**。
+理由见下面 NEED_CERTAIN 的注释 —— 一句话是"越不做事，越要证据"。
 """
 
 from __future__ import annotations
@@ -32,6 +36,21 @@ ROUTES = ("direct", "rag", "clarify", "refuse")
 
 HIGH = 0.75
 LOW = 0.45
+
+# "不查资料"的两个出口。它们和 rag 的关键区别是：**用户什么都拿不到。**
+#   拒答 → 用户被挡在门外
+#   反问 → 用户得多说一轮才知道系统到底能不能答
+# 而误判成 rag 的代价只是"白检索一次"——检索有出处可核对，猜错最多是答得不够好。
+# 代价如此不对称，门槛就不该一样。
+_DENY_ROUTES = ("refuse", "clarify")
+
+# 走上面那两个出口所需的置信度。
+# 为什么是 0.9 而不是沿用 0.75？因为模型的**自报置信度校准很差**，实测：
+# 同一条正经问题（"XX 项目有几个节点？"）连问三次，拿到过
+# rag(0.60) / refuse(0.85) / rag(0.45) —— **0.85 的误判比 0.60 的正判还自信**。
+# 也就是说这个数字本身不可信，只能用来做"相对比较"。既然不可信，
+# 就把它花在代价最低的那条路上：不确定时去查资料，而不是把用户拒掉。
+NEED_CERTAIN = 0.90
 
 # L0 规则：这些不需要问模型
 _GREET = re.compile(r"^(你好|您好|hi|hello|嗨|在吗|哈喽|早上好|晚上好|谢谢|多谢|感谢|再见|拜拜)[!！。.~～\s]*$", re.I)
@@ -112,6 +131,21 @@ class IntentRouter:
                                completion_tokens=res.completion_tokens,
                                meta={"route": route, "confidence": round(conf, 3)})]
             # L2：置信度分流
+            #
+            # 一句话概括这段的取向：**越"不做事"的决定，要求的证据越高。**
+            # 所以先判 deny 类出口，再判置信度档位 —— 顺序不能反，
+            # 反了就会先按普通档位把 refuse 放行，来不及拦。
+            if route in _DENY_ROUTES:
+                if conf >= NEED_CERTAIN:
+                    return IntentResult(route, conf, reason, "L1_llm", steps)
+                # 记进 trace：这条降级必须可观测，否则"为什么这个问题去检索了"
+                # 在事后根本查不出来。
+                steps[0].meta["downgraded_from"] = route
+                return IntentResult(
+                    "rag", conf,
+                    f"{route} 需 {NEED_CERTAIN:.2f} 以上置信（当前 {conf:.2f}），保守走检索：{reason}",
+                    "L1_llm", steps)
+
             if conf < LOW:
                 return IntentResult("clarify", conf, f"置信度过低（{conf:.2f}）：{reason}", "L1_llm", steps)
             if conf < HIGH:

@@ -36,6 +36,10 @@ KERNEL_PID=$!
 # 如果环境里设了 http_proxy（很常见），请求会被代理劫持到别处去，
 # 表现是"服务明明起来了却探测不到"。本机探测一律绕过代理。
 PORT="${CITEPILOT_SERVE_PORT:-8077}"
+# 这里刻意不判断 HTTP 状态码：内核的 /health 需要 X-Internal-Token 头，
+# 不带 token 会返回 401 —— 而"能返回 401"本身就说明服务已经在监听并响应了，即已就绪。
+# 如果改成判断 200，token 一旦没配好就会在这里死等到超时，反而更难排查。
+# （启动日志里那句 "GET /health 401 Unauthorized" 就是这次探测留下的，属正常现象。）
 for i in $(seq 1 80); do
   if curl -s --noproxy '*' -o /dev/null "http://127.0.0.1:${PORT}/health" 2>/dev/null; then
     echo "✓ 内核就绪"

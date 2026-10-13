@@ -19,11 +19,13 @@ public class GatewayProperties {
     private final RateLimit rateLimit = new RateLimit();
     private final Session session = new Session();
     private final Audit audit = new Audit();
+    private final Corpus corpus = new Corpus();
 
     public Kernel getKernel() { return kernel; }
     public RateLimit getRateLimit() { return rateLimit; }
     public Session getSession() { return session; }
     public Audit getAudit() { return audit; }
+    public Corpus getCorpus() { return corpus; }
 
     /** 上游 Python 内核。 */
     public static class Kernel {
@@ -99,8 +101,7 @@ public class GatewayProperties {
     }
 
     /** 审计。落 JSONL 文件，一个文件一行，方便直接 grep 与导入。 */
-    public static class Audit {
-        private boolean enabled = true;
+    public static class Audit {        private boolean enabled = true;
         private String path = "var/gateway-audit.jsonl";
         /** 内存里保留多少条供演示页展示。 */
         private int memoryBuffer = 200;
@@ -111,5 +112,36 @@ public class GatewayProperties {
         public void setPath(String path) { this.path = path; }
         public int getMemoryBuffer() { return memoryBuffer; }
         public void setMemoryBuffer(int v) { this.memoryBuffer = v; }
+    }
+
+    /**
+     * 内置语料的静态托管。
+     *
+     * <p><b>为什么网关要管这个？</b>因为「答案必带出处」这条承诺，
+     * 落到界面上就是引用里那个可点的链接。内置语料的锚点是
+     * {@code corpus/payment-handbook/index.html#ch-3-2} —— 它指向一个真实网页，
+     * 而那个网页必须有人通过 HTTP 提供出来。内核只出 JSON，不托管网页
+     * （它现在也没有静态目录），所以托管这件事只能落在网关或更前面的 nginx 上。
+     *
+     * <p><b>为什么不做成"内核托管、网关透传"？</b>
+     * 那样"语料在哪"只有一处真相，更干净；但网关就得再写一段静态文件流式转发，
+     * 还要自己处理 Content-Type 推断、大文件、Range 请求 —— 全是已经有人写好的活。
+     * 网关直接把目录挂上去，用的是 Spring 现成的资源处理器，零额外失败模式。
+     * 代价是"语料目录"这个路径同时被内核（建索引）和网关（托管文件）知道，
+     * 两边默认值都指向 {@code ../corpus}，可用同一个环境变量对齐。
+     *
+     * <p>生产部署时 {@code enabled} 一关，改由 nginx / CDN 托管，
+     * 网关就不必再搬运静态文件。
+     */
+    public static class Corpus {
+        /** 语料根目录。默认 ../corpus —— 网关的工作目录是 CitePilot/gateway。 */
+        private String dir = "../corpus";
+        /** 是否由网关托管静态语料。 */
+        private boolean enabled = true;
+
+        public String getDir() { return dir; }
+        public void setDir(String dir) { this.dir = dir; }
+        public boolean isEnabled() { return enabled; }
+        public void setEnabled(boolean enabled) { this.enabled = enabled; }
     }
 }

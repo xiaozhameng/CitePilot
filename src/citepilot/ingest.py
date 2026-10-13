@@ -20,19 +20,21 @@ from pathlib import Path
 from bs4 import BeautifulSoup, Tag
 
 from .schema import Chunk
+# 长度策略、短块合并、空白归一化都放在 split.py —— 上传文档的切分器要跟这里
+# 用同一套标准，所以不能留在本文件里各写一份。别名保留了原来的私有名，
+# 是为了让下面的走读代码一个字都不用改（改名的批量替换最容易误伤 _norm_chapter_no）。
+from .split import (
+    MAX_CHARS,
+    MIN_CHARS,
+    merge_short as _merge_short,
+    norm_text as _norm,
+)
 
 # 这些标签里的东西不是知识，是渲染物
 SKIP_TAGS = {"script", "style", "svg", "defs", "nav", "aside", "noscript", "button"}
 
 # 这些标签本身就是一段正文
 BLOCK_TAGS = {"p", "li", "figcaption", "summary", "blockquote", "dt", "dd"}
-
-# 单个 Chunk 的目标长度（字符）。太小丢上下文，太大稀释向量语义。
-MAX_CHARS = 480
-
-# 低于这个长度的碎片会被并入相邻块。整章导语、图注这类短句单独成块时，
-# 会把 Top-K 的名额占掉，而它们本身没有足够信息回答任何问题。
-MIN_CHARS = 60
 
 # 不参与索引的章节：自测题是评测集的答案，必须排除
 EXCLUDE_FROM_INDEX = {"ch-appx-quiz"}
@@ -58,12 +60,6 @@ def _norm_chapter_no(raw: str) -> str:
     if "GUIDE" in raw.upper():
         return "导读"
     return raw.strip()
-
-
-def _norm(s: str) -> str:
-    """归一化空白：HTML 里的换行缩进全是噪音。"""
-    s = s.replace("\u00a0", " ").replace("\u3000", " ")
-    return re.sub(r"\s+", " ", s).strip()
 
 
 def _txt(node: Tag) -> str:
@@ -245,73 +241,6 @@ def build_chunks(html_path: Path, exclude: set[str] | None = None) -> list[Chunk
     for i, c in enumerate(chunks, 1):
         c.order = i
     return chunks
-
-
-def _merge_short(chunks: list[Chunk]) -> list[Chunk]:
-    """把过短的碎片并入相邻块。
-
-    为什么必须做：检索是按块算分的，一个 4 个字的块（"读完之后"）如果
-    因为某种词面巧合排进了 Top-5，就会挤掉一个真正有内容的块，
-    而它作为"出处"毫无价值 —— 引用一段 4 个字等于没有出处。
-    合并只在同一章内进行，且不跨越问答块（问答块有自己的结构）。
-    """
-    out: list[Chunk] = []
-    buf: Chunk | None = None
-
-    def push(c: Chunk) -> None:
-        """把一个（可能过短的）块送进结果，过短就并入前一个块。"""
-        if len(c.text) < MIN_CHARS and out and out[-1].kind == "prose":
-            out[-1].text = f"{out[-1].text}\n{c.text}"
-        else:
-            out.append(c)
-
-    for c in chunks:
-        if c.kind != "prose":
-            # 问答块有自己的结构，不能和散文混在一起。
-            # 但缓冲区里攥着的那块不能直接扔掉条件判断 —— 这里是第一版的漏洞：
-            # 碰到问答块就直接 append，短块就这么漏进了语料（实测出现 51 字的块）。
-            if buf is not None:
-                push(buf)
-                buf = None
-            out.append(c)
-            continue
-        if buf is None:
-            buf = c
-            continue
-        if len(buf.text) < MIN_CHARS:
-            # 累积：两个 25 字的碎片并起来还是 50 字，仍然不够，得继续攒
-            c.text = f"{buf.text}\n{c.text}"
-            buf = c
-        else:
-            out.append(buf)
-            buf = c
-    if buf is not None:
-        push(buf)
-
-    # 兜底清理：上面两轮只能处理"相邻"的情况，仍然会漏掉两类块 ——
-    #   1) 紧跟问答块之后的短散文（前面的块不是散文，push 没地方并）
-    #   2) 一章里排在很前面的短块（前面还没有散文块可并）
-    # 这两类如果不处理，就会出现 4 个字的"出处"（实测真有）。
-    i = 0
-    while i < len(out):
-        c = out[i]
-        if c.kind == "prose" and len(c.text) < MIN_CHARS and len(out) > 1:
-            nxt = next((j for j in range(i + 1, len(out)) if out[j].kind == "prose"), None)
-            prv = next((j for j in range(i - 1, -1, -1) if out[j].kind == "prose"), None)
-            if nxt is not None:
-                out[nxt].text = f"{c.text}\n{out[nxt].text}"
-                del out[i]
-                continue
-            if prv is not None:
-                out[prv].text = f"{out[prv].text}\n{c.text}"
-                del out[i]
-                continue
-        i += 1
-    # 重新编号：合并之后原来的序号会出现空洞，且块数变了。
-    # 编号只求唯一和稳定，所以用「章 id + 序号」即可。
-    for i, c in enumerate(out, 1):
-        c.chunk_id = f"{c.chapter_id}::c{i:03d}"
-    return out
 
 
 def save_chunks(chunks: list[Chunk], out_path: Path) -> None:

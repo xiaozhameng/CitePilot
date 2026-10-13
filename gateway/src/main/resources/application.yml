@@ -8,7 +8,10 @@ spring:
   application:
     name: citepilot-gateway
   codec:
-    max-in-memory-size: 2MB
+    # 流式 SSE 与 multipart 转发本身都是流式的，这个值限制的是"需要整体缓冲"的场景。
+    # 但知识库上传会让请求体经过编解码器，2MB 在传一份 PDF 时会直接报
+    # DataBufferLimitException —— 所以放大到 16MB。
+    max-in-memory-size: 16MB
 
 gateway:
   kernel:
@@ -32,6 +35,15 @@ gateway:
     max-turns: 20
     idle-timeout: 30m
     max-sessions: 500
+
+  corpus:
+    # 内置语料的根目录。引用里的锚点长这样：
+    #   corpus/payment-handbook/index.html#ch-3-2
+    # 它必须真的能通过 HTTP 打开，否则「查看原文」就是 404。
+    # 默认 ../corpus —— 网关的工作目录是 CitePilot/gateway。
+    # 生产环境把它关掉，交给 nginx / CDN 托管。
+    enabled: true
+    dir: ${CITEPILOT_CORPUS_ROOT:../corpus}
 
   audit:
     enabled: true

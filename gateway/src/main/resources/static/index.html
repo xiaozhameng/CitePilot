@@ -200,6 +200,51 @@
   .aitem .m{display:flex;gap:8px;font-family:var(--mono);color:var(--dim);font-size:10.5px;flex-wrap:wrap}
   .aitem .m .g{color:var(--ok)} .aitem .m .r{color:var(--warn)} .aitem .m .e{color:var(--err)}
 
+  /* ---------- 知识库面板 ---------- */
+  .drop{
+    border:1.5px dashed var(--border);border-radius:9px;padding:14px 10px;text-align:center;
+    color:var(--muted);font-size:12px;line-height:1.7;cursor:pointer;background:#0d1117;
+    transition:border-color .18s,background .18s,color .18s;
+  }
+  .drop b{color:var(--text);font-weight:600}
+  .drop:hover{border-color:var(--accent-dim);color:var(--accent)}
+  .drop:hover b{color:var(--accent)}
+  /* over = 文件悬停在拖放区上方；busy = 正在上传/重建。
+     两个状态必须长得不一样：如果都是同一种高亮，用户拖完文件后
+     看到"还亮着"会以为没传成功，于是再拖一次 —— 重复入库就发生在这里。 */
+  .drop.over{border-color:var(--accent);background:#1f6feb1a;color:var(--accent)}
+  .drop.busy{cursor:progress;border-style:solid;border-color:var(--accent-dim);
+    background:#1f6feb11;color:var(--accent)}
+  /* 文档多了不能把侧栏撑爆，所以列表自己滚。 */
+  .doclist{margin-top:10px;max-height:196px;overflow-y:auto}
+  .docrow{
+    display:flex;align-items:center;gap:8px;padding:6px 8px;border-radius:6px;
+    background:var(--panel2);border:1px solid #21262d;margin-bottom:5px;font-size:12px;
+  }
+  .docrow .dname{
+    flex:1;min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;
+    color:var(--text);cursor:default;
+  }
+  .docrow .dmeta{flex:0 0 auto;font-family:var(--mono);font-size:10.5px;color:var(--dim)}
+  .docrow .del{
+    flex:0 0 auto;background:transparent;border:1px solid transparent;color:var(--dim);
+    cursor:pointer;font-size:15px;line-height:1;padding:1px 6px;border-radius:5px;
+    transition:color .15s,border-color .15s,background .15s;
+  }
+  .docrow .del:hover{color:var(--err);border-color:#8b2c2c55;background:#f851491a}
+  .kbfoot{display:flex;align-items:center;gap:8px;margin-top:9px}
+  .kbfoot .sum{flex:1;font-family:var(--mono);font-size:10.5px;color:var(--dim)}
+  .btn{
+    background:var(--panel2);border:1px solid var(--border);color:var(--muted);
+    border-radius:6px;padding:4px 10px;cursor:pointer;font-size:11.5px;
+    transition:border-color .15s,color .15s;
+  }
+  .btn:hover:not(:disabled){border-color:var(--accent-dim);color:var(--accent)}
+  .btn:disabled{opacity:.45;cursor:not-allowed}
+  .kbmsg{font-size:11.5px;margin-top:8px;line-height:1.55;word-break:break-word}
+  .kbmsg.ok{color:var(--ok)}
+  .kbmsg.err{color:var(--err)}
+
   .empty{color:var(--dim);font-size:12px;padding:9px 0;text-align:center}
   ::-webkit-scrollbar{width:9px;height:9px}
   ::-webkit-scrollbar-track{background:transparent}
@@ -236,8 +281,9 @@
     <div class="stream" id="stream">
       <div class="msg">
         <div class="who">CitePilot</div>
-        <div class="answer">这个知识库收录了一份《支付通识》电子书（118 个知识块）。<br>
-问我支付领域的问题，我会给出答案，并且<b>每个结论后面都带角标</b>——点角标能跳到出处。
+        <div class="answer">这个知识库里有一份《支付通识》电子书（118 个知识块），你也可以<b>自己上传文档</b>。
+右侧「知识库」面板可以拖文件进去（md / txt / html / pdf / docx），传完自动重建索引，立刻就能问到。<br>
+问我问题，我会给出答案，并且<b>每个结论后面都带角标</b>——点角标能跳到出处。
 如果资料里没有，我会直接说"没有"，不编。</div>
       </div>
     </div>
@@ -252,11 +298,31 @@
 
   <aside>
     <div class="card">
+      <h3>知识库<span class="line"></span></h3>
+      <div class="drop" id="drop">
+        <b>拖文件到这里</b>，或点击选择<br>
+        <span id="dropHint">md / txt / html / pdf / docx</span>
+      </div>
+      <!-- 这个 input 是"点击选择"背后真正的载体。拖放区只是个 UI 壳，
+           浏览器的文件选择框必须由一个真实 <input type=file> 触发 —— 
+           而且它必须留在 DOM 里，不能挂到别处再移除。 -->
+      <input type="file" id="file" multiple style="display:none"
+             accept=".md,.markdown,.txt,.text,.html,.htm,.pdf,.docx">
+      <div class="doclist" id="doclist"><div class="empty">加载中…</div></div>
+      <div class="kbfoot">
+        <span class="sum" id="kbFoot">—</span>
+        <button class="btn" id="kbRebuild">重建索引</button>
+      </div>
+      <div class="kbmsg" id="kbMsg" style="display:none"></div>
+    </div>
+
+    <div class="card">
       <h3>内核状态<span class="line"></span></h3>
       <div class="kv"><span class="k">生成模型</span><span class="v" id="hLlm">—</span></div>
       <div class="kv"><span class="k">Embedding</span><span class="v" id="hEmb">—</span></div>
       <div class="kv"><span class="k">Rerank</span><span class="v" id="hRk">—</span></div>
       <div class="kv"><span class="k">索引</span><span class="v" id="hIdx">—</span></div>
+      <div class="kv"><span class="k">上传文档</span><span class="v" id="hKb">—</span></div>
       <div class="kv"><span class="k">并发位</span><span class="v" id="hSlots">—</span></div>
     </div>
 
@@ -499,6 +565,26 @@ function esc(s) {
     c => ({"&":"&amp;","<":"&lt;",">":"&gt;",'"':"&quot;","'":"&#39;"}[c]));
 }
 
+/**
+ * 把内核给的锚点翻成"浏览器能打开的地址"。
+ *
+ * 内核返回的 anchor 是**它自己的视角**，两种形态：
+ *   - 内置语料：corpus/payment-handbook/index.html#ch-3-2
+ *   - 上传文档：/v1/kb/documents/{id}/raw?chunk={块id}
+ * 而浏览器实际要访问的是网关的地址：语料在 /corpus/**（网关挂了静态目录），
+ * 知识库接口在 /api/kb/**（网关把内核的 /v1/kb/** 转发过去）。
+ *
+ * 为什么映射放在前端，而不是让内核直接返回 /api/... ？
+ * 因为内核不该知道网关把东西挂在哪个前缀上 —— 今天网关叫 /api，
+ * 明天前面加了 nginx 换成 /kb-api，内核要跟着改，那就白分层了。
+ * 只有"内核路径 → 对外路径"这一层映射，本就该由最外层持有。
+ */
+function resolveAnchor(a) {
+  if (!a) return "#";
+  if (a.startsWith("/")) return a.replace(/^\/v1\//, "/api/");
+  return "/" + a;
+}
+
 function renderSources(cits) {
   if (!cits || !cits.length) return "";
   return `<div class="sources"><h4>出处 · 点角标可定位</h4>` +
@@ -508,7 +594,7 @@ function renderSources(cits) {
         <div class="body">
           <div class="label">${esc(c.label)}</div>
           <div class="quote">${esc((c.quote || "").slice(0, 130))}${(c.quote || "").length > 130 ? "…" : ""}</div>
-          <a href="../${esc(c.anchor)}" target="_blank" rel="noopener">查看原文 →</a>
+          <a href="${esc(resolveAnchor(c.anchor))}" target="_blank" rel="noopener">查看原文 →</a>
         </div>
       </div>`).join("") + `</div>`;
 }
@@ -574,6 +660,15 @@ async function loadHealth() {
     $("hRk").textContent = k.rerank ? k.rerank.provider : "—";
     $("hRk").className = "v " + (k.rerank && k.rerank.provider !== "none" ? "ok" : "warn");
     $("hIdx").textContent = k.index ? k.index.split("|")[0].trim() : "—";
+    const kb = k.kb || {};
+    if (kb.documents == null) {
+      $("hKb").textContent = "—"; $("hKb").className = "v";
+    } else if (kb.documents === 0) {
+      $("hKb").textContent = "仅内置语料"; $("hKb").className = "v";
+    } else {
+      $("hKb").textContent = `${kb.documents} 份 · ${kb.chunks ?? 0} 块`;
+      $("hKb").className = "v ok";
+    }
     const g = d.gateway || {};
     $("hSlots").textContent = `${g.streamSlotsAvailable ?? "—"} / ${g.streamSlotsMax ?? "—"}`;
   } catch (e) {
@@ -626,6 +721,181 @@ async function loadAudit() {
 }
 
 // ============================================================
+// 知识库面板
+//
+// 这一块和问答链路是两条独立的路径：问答走 /api/ask/stream（SSE），
+// 知识库走 /api/kb/**（普通 JSON）。它们唯一的关系是：
+// 上传/删除会触发内核重建索引，重建完成后新文档立刻可召回到。
+//
+// 重建是"先建新索引对象、再替换引用"，所以在途的问答不受影响 ——
+// 这也是为什么这里敢在上传后直接就重建，而不必先停服务。
+// ============================================================
+const KB = { docs: [], busy: false, hint: "md / txt / html / pdf / docx" };
+
+async function loadKb() {
+  try {
+    const r = await fetch("/api/kb/documents");
+    const d = await r.json();
+    if (!r.ok) throw new Error(d.error || `HTTP ${r.status}`);
+    KB.docs = d.documents || [];
+    if (d.supported_suffixes && d.supported_suffixes.length) {
+      // 格式列表由内核给，前端不写死 —— 否则内核加了一种格式，
+      // 这里的提示语还停在旧列表上，用户会以为不支持。
+      KB.hint = d.supported_suffixes.map(s => s.replace(/^\./, "")).join(" / ");
+      if (!KB.busy) $("dropHint").textContent = KB.hint;
+    }
+    renderKb(d);
+  } catch (e) {
+    $("doclist").innerHTML = `<div class="empty">知识库加载失败：${esc(e.message)}</div>`;
+  }
+}
+
+function renderKb(d) {
+  const docs = KB.docs;
+  $("doclist").innerHTML = docs.length
+    ? docs.map(x => `
+        <div class="docrow">
+          <span class="dname" title="${esc(x.filename)} · 上传于 ${esc((x.added_at || "").slice(0, 16).replace("T", " "))}">${esc(x.name)}</span>
+          <span class="dmeta">${x.chunk_count} 块 · ${humanSize(x.size)}</span>
+          <button class="del" data-doc="${esc(x.doc_id)}" title="从知识库移除">×</button>
+        </div>`).join("")
+    : `<div class="empty">还没有上传文档</div>`;
+  $("kbFoot").textContent = `上传 ${docs.length} 份 · ${d.total_chunks ?? 0} 块`;
+}
+
+function humanSize(n) {
+  n = Number(n) || 0;
+  if (n < 1024) return n + "B";
+  if (n < 1048576) return (n / 1024).toFixed(1) + "KB";
+  return (n / 1048576).toFixed(1) + "MB";
+}
+
+function kbMsg(text, kind) {
+  const el = $("kbMsg");
+  el.textContent = text;
+  el.className = "kbmsg " + (kind || "");
+  el.style.display = "block";
+}
+
+function kbBusy(on, text) {
+  KB.busy = !!on;
+  const drop = $("drop");
+  drop.classList.toggle("busy", !!on);
+  if (!on) drop.classList.remove("over");
+  $("dropHint").textContent = on ? (text || "处理中…") : KB.hint;
+  $("kbRebuild").disabled = !!on;
+}
+
+/** 调内核重建索引，返回结果对象。上传/删除/点按钮都走它，避免三处各写一遍。 */
+async function kbDoRebuild() {
+  const r = await fetch("/api/kb/rebuild", { method: "POST" });
+  const d = await r.json();
+  if (!r.ok) throw new Error(d.error || `HTTP ${r.status}`);
+  return d;
+}
+
+async function kbUpload(files) {
+  if (KB.busy || !files.length) return;
+  kbBusy(true, `上传中 0/${files.length}…`);
+
+  let ok = 0, fail = 0;
+  for (let i = 0; i < files.length; i++) {
+    const f = files[i];
+    kbBusy(true, `上传中 ${i + 1}/${files.length}：${f.name}`);
+    try {
+      const fd = new FormData();
+      fd.append("file", f);
+      // rebuild=false：先只入库。多份文件时逐份重建等于重建 N 次，
+      // 而重建是全量的（BM25 的 IDF 是全局统计量，天然没法增量），
+      // 所以统一等到最后再重建一次。
+      const r = await fetch("/api/kb/documents?rebuild=false", { method: "POST", body: fd });
+      const d = await r.json();
+      if (!r.ok) throw new Error(d.error || `HTTP ${r.status}`);
+      ok++;
+    } catch (e) {
+      fail++;
+      kbMsg(`「${f.name}」上传失败：${e.message}`, "err");
+    }
+  }
+
+  if (ok) {
+    kbBusy(true, `重建索引（新增 ${ok} 份）…`);
+    try {
+      const d = await kbDoRebuild();
+      kbMsg(`已入库 ${ok} 份，索引重建为 ${d.chunks} 块${fail ? `，${fail} 份失败` : ""}`, fail ? "err" : "ok");
+    } catch (e) {
+      kbMsg(`已入库 ${ok} 份，但重建索引失败：${e.message}。点「重建索引」重试。`, "err");
+    }
+  }
+
+  kbBusy(false);
+  await loadKb();
+  loadHealth();
+}
+
+async function kbDelete(docId) {
+  if (KB.busy) return;
+  if (!confirm(`从知识库移除「${docId}」？\n该文档的所有知识块会被删掉，索引将重建。`)) return;
+  kbBusy(true, `移除 ${docId} …`);
+  try {
+    // doc_id 允许中文，必须编码后再进 URL，否则带特殊字符的文档删不掉。
+    const r = await fetch(`/api/kb/documents/${encodeURIComponent(docId)}?rebuild=true`,
+                          { method: "DELETE" });
+    const d = await r.json();
+    if (!r.ok) throw new Error(d.error || `HTTP ${r.status}`);
+    kbMsg(`已移除「${docId}」，索引重建为 ${d.rebuild ? d.rebuild.chunks : "?"} 块`, "ok");
+  } catch (e) {
+    kbMsg(`移除失败：${e.message}`, "err");
+  }
+  kbBusy(false);
+  await loadKb();
+  loadHealth();
+}
+
+function kbBind() {
+  const drop = $("drop"), input = $("file");
+
+  drop.addEventListener("click", () => { if (!KB.busy) input.click(); });
+  input.addEventListener("change", () => {
+    if (input.files.length) kbUpload([...input.files]);
+    input.value = "";   // 清空，否则连续选同一个文件不会再触发 change
+  });
+
+  drop.addEventListener("dragenter", e => { e.preventDefault(); if (!KB.busy) drop.classList.add("over"); });
+  drop.addEventListener("dragover",  e => { e.preventDefault(); if (!KB.busy) drop.classList.add("over"); });
+  drop.addEventListener("dragleave", e => { e.preventDefault(); drop.classList.remove("over"); });
+  drop.addEventListener("drop", e => {
+    e.preventDefault();
+    drop.classList.remove("over");
+    kbUpload([...(e.dataTransfer?.files || [])]);
+  });
+
+  // 全局兜底：文件要是掉在拖放区之外，浏览器默认会"打开这个文件"，
+  // 页面直接被替换掉，用户以为程序崩了。所以整页都要拦。
+  window.addEventListener("dragover", e => e.preventDefault());
+  window.addEventListener("drop", e => e.preventDefault());
+
+  // 文档列表用事件委托：doc_id 允许中文和引号，直接拼进 onclick 会被注入搞坏。
+  $("doclist").addEventListener("click", e => {
+    const btn = e.target.closest(".del");
+    if (btn) kbDelete(btn.dataset.doc);
+  });
+
+  $("kbRebuild").addEventListener("click", async () => {
+    if (KB.busy) return;
+    kbBusy(true, "重建索引…");
+    try {
+      const d = await kbDoRebuild();
+      kbMsg(`重建完成：${d.chunks} 块`, "ok");
+    } catch (e) {
+      kbMsg(`重建失败：${e.message}`, "err");
+    }
+    kbBusy(false);
+    loadHealth();
+  });
+}
+
+// ============================================================
 // 交互
 // ============================================================
 let lastThought = "";
@@ -653,6 +923,7 @@ function send() {
 }
 
 // 初始化
+kbBind(); loadKb();
 loadHealth(); loadStats(); loadAudit();
 setInterval(loadHealth, 15000);
 

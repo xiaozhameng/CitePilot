@@ -2,7 +2,8 @@
 
 **带出处的垂直知识问答 Agent** —— 答案里的每一句事实，都能点回原文的具体章节。
 
-语料是一本 19 万字的支付领域电子书（25 章、118 个检索块）。
+语料默认是一本 19 万字的支付领域电子书（25 章、118 个检索块），
+也可以**随时上传自己的文档**（md / txt / html / pdf / docx），传完立即重建索引、马上能问。
 它不是"调个 API 套个壳"的 RAG demo，而是一条完整链路：
 三档意图分流 → 双路召回 → RRF 融合 → 精排 → **自纠正重检** → 带引用生成 → 引用校验 → 全链路 trace → 评测回归。
 
@@ -10,13 +11,14 @@
 
 ## 为什么做这个
 
-「给出答案时提供出处」看起来是个小需求，落地要解决四个真问题：
+「给出答案时提供出处」看起来是个小需求，落地要解决五个真问题：
 
 | 问题 | 难点 | 本项目的解法 |
 |---|---|---|
 | 让模型愿意标引用 | prompt 里写"必须标"没用，模型会先凭记忆答完再随手补角标 | 系统提示里明确"无资料支撑的断言一律不许写"，并给出反例 |
 | 让引用是**真的** | 模型可能写出 `[7]` 而本次只召回了 5 条 | 生成后逐条校验角标编号是否越界，越界即视为幻觉 |
 | 校验不过怎么办 | 直接报错等于服务不可用 | 把失败原因回灌给模型重写一次；再不过就降级为**原文摘录**，宁可不流畅也不编造 |
+| 引用**点得开**吗 | 角标做得再漂亮，点下去 404 也是白搭 | 内置语料由网关挂 `/corpus/**` 静态托管，上传文档由 `/api/kb/.../raw` 给原文；前端一层 `resolveAnchor()` 把内核锚点翻成对外地址 |
 | 怎么证明它变好了 | 没有数字的"优化"都是自我感觉 | 57 条人工可核对的评测集 + 三组对照实验，见下 |
 
 ---
@@ -82,6 +84,16 @@
 验证：在口语化评测集上对比"top1 rerank 分"与"是否命中正确章节"——命中组最低 0.048，未命中组最高 0.918，**完全重叠**。
 结论：**没上。** 裁判调用省不掉。这个负结果比一个"成功优化"更有价值 —— 它说明这个分数只反映"Query 与这条的相关度"，不反映"资料集是否完整"。
 
+**8. 80 个测试全绿，服务却起不来**
+现象：上传接口写完、单元测试 80 个全过、代码 review 也过了，但 `./scripts/dev.sh` 一跑就炸 ——
+`RuntimeError: Form data requires "python-multipart" to be installed.`
+定位：报错发生在 `create_app()` 里、FastAPI 解析 `UploadFile = File(...)` 这个签名的时候。
+根因：**测试测的全是"函数"（切分、融合、引用校验），没有一个真去把应用装配起来** —— 而"缺依赖"这件事只在装配那一刻才暴露。
+修复：装包 + 写进 `pyproject.toml` + 新增 `tests/test_server_smoke.py`，专门守四件事：
+应用能装配、几个关键路由都注册上了、上传字段名必须叫 `file`（网关转发时用的是同一个名字）、
+以及每种"对外宣称支持"的格式其抽取器都能 import（因为抽取器是懒加载的，缺依赖会被推迟到用户传文件那一刻才爆）。
+顺带发现 `pypdf` / `python-docx` 也是同样的问题：装着、但没声明。**"我机器上能跑"是一种依赖缺陷。**
+
 ---
 
 ## 当前已知瓶颈：首字延迟（诚实版）
@@ -118,7 +130,38 @@
    它波动 1.3 ~ 4.3 秒，是因为当前用的推理模型（`deepseek-v4-flash`）会先在 `reasoning_content` 里想一大段。
    注意：**不要**试图用"top1 rerank 分"去替代裁判 —— 这个想法我试过了，见下面的负结果。真要做，方向是换一个非推理的小模型专门干判定这件事。
 
-**为什么现在不做？** 因为前两条都要动结构，而当前版本的正确性（引用可信率 100%、43+11 个测试全绿）是刚验完的。在演示前一天动主链路，风险收益不匹配。**知道瓶颈在哪、知道怎么改、并且知道为什么现在不改** —— 这比"看起来很流畅"更能说明问题。
+**为什么现在不做？** 因为前两条都要动结构，而当前版本的正确性（引用可信率 100%、102 个测试全绿）是刚验完的。在演示前一天动主链路，风险收益不匹配。**知道瓶颈在哪、知道怎么改、并且知道为什么现在不改** —— 这比"看起来很流畅"更能说明问题。
+
+## 另一个已知缺陷：意图分流会间歇性反问
+
+**先说清楚：这不是"偶尔"，约 1/6 的概率，而且我已经修了一半。**
+
+同一条完全正常的问题（"XX 项目有几个节点？"）连问 6 次，模型给出的置信度是：
+
+```
+0.30  0.45  0.60  0.60  0.62  0.55
+```
+
+**同一个问题，模型自报的 confidence 在 0.30~0.62 之间随机跳。** 这不是信号，是噪声。
+而 `intent.py` 原本的策略是"置信度 < 0.45 → 反问澄清" ——
+于是那 0.30 的一次就把一个清清楚楚的事实型问题变成了"能不能再说具体点？"。
+
+已经修掉的是更难看的那一半：**出口是"拒答"时，门槛从 0.75 单独抬到 0.90** ——
+因为拒答最像"系统坏了"，而且实测出现过"模型说拒绝、置信度 0.85"的误判（比它给正确答案的 0.60 还自信）。
+做法和验证写在 `tests/test_intent.py` 里，**用假 LLM 直接喂 (标签, 置信度)**，把阈值策略单独钉死 ——
+不依赖真模型的随机性，所以这 15 个测试是稳定的。
+
+**没修完的是"低置信 → 反问"这条老规则。** 它的意图是"问题本身模糊就反问"，
+但实际触发它的是模型对置信度的自评，而那个自评不可信。
+彻底的修法是"低置信也走检索"（检索有出处可核对，且下游还有充分性裁判兜底），
+代价是真正模糊的问题要多花两次模型调用才给出"资料里没有"。
+**这条留着 —— 因为"随机反问"用户还能看懂（他会换个说法再问），而"随机拒答"不能。**
+
+**这个缺陷最值得讲的一点不是结论，是过程：** 我第一次验的时候连问 3 次拿到 2 对 1 错，
+改完之后连问 5 次全对，差点就写"已修复"了。再连问 6 次才发现门槛一次都没触发过 ——
+**"改完连测 5 次都过"在 1/6 的故障率下，本来就是大概率事件（约 40%）。**
+所以最后真正被信任的是那 15 个不依赖模型的单测，不是那 5 次全对。
+
 
 ---
 
@@ -126,11 +169,13 @@
 
 ```
 接入层   Spring Boot 网关  gateway/  (Java 21 · WebFlux)
-         ├── ChatController   /api/ask（非流式）· /api/ask/stream（SSE 透传）
-         ├── MetaController   /api/health · /api/stats · /api/recent · /api/sessions
-         ├── RateLimiter      令牌桶（管速率）+ 信号量（管并发）
-         ├── SessionStore     会话归属 · 轮次记录 · LRU 淘汰
-         └── AuditLog         每轮问答落 JSONL（谁 · 何时 · 用了多少）
+         ├── ChatController        /api/ask（非流式）· /api/ask/stream（SSE 透传）
+         ├── KbController          /api/kb/**（列表 · 上传 · 删除 · 重建 · 取原文）
+         ├── MetaController        /api/health · /api/stats · /api/recent · /api/sessions
+         ├── StaticResourceConfig  /corpus/** → 内置语料目录（引用深链的落点）
+         ├── RateLimiter           令牌桶（管速率）+ 信号量（管并发）
+         ├── SessionStore          会话归属 · 轮次记录 · LRU 淘汰
+         └── AuditLog              每轮问答落 JSONL（谁 · 何时 · 用了多少）
               ↓ HTTP + SSE  （内核是唯一上游，X-Internal-Token 鉴权）
 编排层   Python Agent Core
          ├── server.py     FastAPI：HTTP + SSE 服务层，内核对外的唯一入口
@@ -138,9 +183,13 @@
          ├── retriever.py  双路召回 → 去重 → RRF → 精排
          ├── judge.py      充分性裁判 + 查询改写 + 忠实度打分
          ├── answer.py     带引用生成 + 引用校验 + 摘录降级（含流式版）
-         └── agent.py      主循环（三道防死循环刹车 · RetrieveLoop 双路复用）
+         ├── agent.py      主循环（三道防死循环刹车 · RetrieveLoop 双路复用）
+         ├── index.py      索引：内置语料 + 上传文档合并，支持原子热替换
+         ├── kb.py         知识库：五格式抽取 · 清单管理 · manifest 原子写
+         └── split.py      切分公共设施（章节装配 · 短块合并）
               ↓
-底座     SQLite（会话 / trace / 评测）+ embedding 缓存
+底座     SQLite（会话 / trace / 评测）+ embedding 缓存（按单条文本 sha1）
+         内置语料 corpus/  ·  上传文档 data/kb/（两者都不进 git）
          DeepSeek（生成）· bge-m3（向量）· bge-reranker（精排）
 ```
 
@@ -152,6 +201,49 @@
 1. **内核扩不了副本。** 它是单进程有状态的（内存里放着 118 条向量 + BM25 索引），前面必须有东西挡流量，否则并发一上来延迟就一起崩。
 2. **职责不能混。** 鉴权、配额、会话属于"服务"层面的事，塞进内核会让它越来越难测 —— 内核应该只关心"答得对不对"。
 3. **内核会被换掉。** 换模型、换检索库、甚至换语言，只要网关这条边界在，调用方一行都不用改。
+
+---
+
+## 动态知识库：从"一份固定语料"到"可以自己喂"
+
+演示页右上角有一个知识库面板：**拖文件进去、看列表、删掉、手动重建**。
+支持 md / txt / html / **pdf / docx**，上传后自动重建索引，立刻就能问。
+
+### 四个必须想清楚的点
+
+**1）为什么不"增量"索引？**
+因为 BM25 的 IDF 是一个**全局统计量** —— 加进一份新文档，所有词项的出现频次分母都变了，
+**已有块的分数会跟着变**。所以"增量"在数学上就等于全量重建，做成"只算新块"只会得到一个错误的索引。
+真正省下的是**向量**：embedding 按单条文本的 sha1 缓存，重建时旧块全部命中缓存，
+只有新块真的去调模型 —— 这才是重建能在一两秒内完成的原因。
+
+**2）重建期间问答会不会抖？**
+不会。做法是**先构建、后替换**：新的 `SearchIndex` 对象完全构造好之后，才用一个赋值语句替换掉运行时引用。
+Python 的引用赋值本身是原子的，所以在途请求要么完整地用旧索引、要么完整地用新索引，
+不存在"索引正拆到一半被读到"的中间态。代价是重建瞬间内存里短暂存在两份索引 —— 这个交换划算。
+
+**3）单个文件传坏了（比如扫描版 PDF）怎么办？**
+**0 个块就报错，并且回滚** —— 绝不留下一条"文档在列表里、但一个块都搜不到"的幽灵记录。
+扫描版 PDF 没有文字层，抽取结果为 0，这时给的是明确提示"这份 PDF 没有文字层，需要先做 OCR"，
+而不是"上传成功"然后用户怎么问都问不出来。
+
+**4）引用怎么保证还能点得开？**
+内置语料的锚点是 `corpus/payment-handbook/index.html#ch-03`（一个真实网页），
+上传文档没有网页可跳，于是内核给它一个 `/v1/kb/documents/{id}/raw?chunk=...` 的原文接口。
+**但内核的路径不等于对外路径**：浏览器要访问的是网关，网关把 `/v1/kb/**` 转发到 `/api/kb/**`、
+把语料目录挂在 `/corpus/**`。这层"内核路径 → 对外路径"的映射放在前端的一个 `resolveAnchor()` 里，
+理由是：内核不该知道网关把东西挂在哪个前缀上，否则明天前面加个 nginx，内核就得跟着改。
+
+### 命令行的等价操作
+
+不用演示页也能管知识库（脚本化导入时更方便）：
+
+```bash
+./.venv/bin/python -m citepilot.cli kb list
+./.venv/bin/python -m citepilot.cli kb add 手册.pdf
+./.venv/bin/python -m citepilot.cli kb rm 手册
+./.venv/bin/python -m citepilot.cli kb rebuild
+```
 
 ---
 
@@ -187,53 +279,89 @@
 
 ## 快速开始
 
+### 零、Java 工具链（只有跑网关时才需要）
+
+内核是 Python，只用命令行问答的话完全不需要 Java。要起网关（以及演示页）时才需要 JDK 21 + Maven。
+
+这套工具链是免安装 tar 包解出来的，放在 `Agent/.tools/`（与 CitePilot 平级），不依赖 brew。
+`~/.zshrc` 里已配好自动加载，**新开一个终端窗口**就能直接用：
+
+```bash
+java -version
+mvn -v
+```
+
+分别应输出 `openjdk version "21.0.12.1"` 与 `Apache Maven 3.9.9`。
+
+如果当前这个终端还没有（例如 `.zshrc` 是刚改的），手动加载一次即可，任何目录下都能执行：
+
+```bash
+source ~/Desktop/AI软件开发/Agent/.tools/env.sh
+```
+
+这会把 `JAVA_HOME` 与 `PATH` 设进当前这个 shell。
+
+想完全不动 `.zshrc` 也行 —— 下面的 `scripts/build.sh` 与 `scripts/dev.sh` 会自己加载工具链，
+不要求你先配好 PATH。这也是为什么所有 Java 相关命令都收敛到了脚本里。
+
 ### 一、命令行（内核自带的 CLI）
 
 ```bash
 cd CitePilot
-cp .env.example .env          # 填入 API Key
-.venv/bin/python -m citepilot.cli doctor            # 体检：模型/向量/精排/语料
-.venv/bin/python -m citepilot.cli build             # 切语料 + 建索引 + 生成评测集
+cp .env.example .env
+.venv/bin/python -m citepilot.cli doctor
+.venv/bin/python -m citepilot.cli build
 .venv/bin/python -m citepilot.cli ask "备付金是什么？"
-.venv/bin/python -m citepilot.cli stats             # P95 / 成本 / 降级分布
+.venv/bin/python -m citepilot.cli stats
 ```
+
+六条依次是：进入项目目录 → 复制一份配置（记得把 API Key 填进去）→ 体检（模型 / 向量 / 精排 / 语料）→ 切语料、建索引、生成评测集 → 问一个问题 → 查看 P95 延迟与成本统计。
 
 ### 二、起完整服务（内核 + Java 网关 + 演示页）
 
 ```bash
-# 首次需要打包网关（本机 Java 21 + Maven 在 Agent/.tools 下，免安装）
-cd gateway && mvn package -DskipTests && cd ..
-
-./scripts/dev.sh              # 一键起两个服务，Ctrl-C 一起停
+./scripts/build.sh
+./scripts/dev.sh
 ```
 
+`build.sh` 只在首次、以及改了 Java 代码或 `static/` 下演示页之后才需要跑；`dev.sh` 一键起内核与网关两个服务，按 Ctrl-C 一起停。
+
 打开 **http://127.0.0.1:8090/** 就是演示页：左侧问答、右侧实时看链路耗时瀑布 / 聚合指标 / 审计流水；顶部可以现场切换召回策略与精排开关，直接做对照实验。
+右侧最上面是**知识库面板** —— 把 md / txt / html / pdf / docx 拖进去，它会自动重建索引，然后立刻就能问这份文档里的内容。试着传一份自己的文件，问一个只有那份文件才知道的问题。
 
 也可以分开起（两个终端）：
 ```bash
-./scripts/kernel.sh           # Python 内核 → :8077
-./scripts/gateway.sh          # Java 网关 → :8090
+./scripts/kernel.sh
+./scripts/gateway.sh
 ```
+
+第一条起 Python 内核（:8077），第二条起 Java 网关（:8090）。
 
 ### 三、评测与测试
 
 ```bash
-PYTHONPATH=src .venv/bin/python evals/run_eval.py                      # 实验 A/C
+PYTHONPATH=src .venv/bin/python evals/run_eval.py
 PYTHONPATH=src .venv/bin/python evals/run_eval.py --gold evals/goldenset_hard.jsonl
-PYTHONPATH=src .venv/bin/python evals/build_hardset.py 15              # 生成口语化难样本
+PYTHONPATH=src .venv/bin/python evals/build_hardset.py 15
 
 .venv/bin/python -m pytest tests -q --cov=citepilot
 ```
 
+前两条跑术语式评测集（第二条换成口语化难样本）；第三条用 LLM 把术语式提问改写成口语化问法，生成难样本；最后一条跑单元测试。
+
 ### 四、直接调 HTTP 接口
 
+非流式：
+
 ```bash
-# 非流式
 curl -s -X POST http://127.0.0.1:8090/api/ask \
   -H 'Content-Type: application/json' \
   -d '{"question":"备付金是什么？"}' | python -m json.tool
+```
 
-# 流式（SSE，逐事件推送）
+流式（SSE，逐事件推送）：
+
+```bash
 curl -N -X POST http://127.0.0.1:8090/api/ask/stream \
   -H 'Content-Type: application/json' \
   -d '{"question":"备付金是什么？"}'
@@ -248,5 +376,8 @@ curl -N -X POST http://127.0.0.1:8090/api/ask/stream \
 | `CITEPILOT_EMBED_PROVIDER` | `bm25` / `ollama` / `siliconflow` | 向量不可用时自动降级为 BM25 单路 |
 | `CITEPILOT_RERANK_PROVIDER` | `none` / `siliconflow` | 关掉则直接用 RRF 名次 |
 | `CITEPILOT_MAX_REWRITE` | `0` / `1` / `2` | 自纠正循环的轮次上限（刹车 1） |
+| `CITEPILOT_KB_DIR` | 路径 | 上传文档的落盘目录（默认 `data/kb`，已 gitignore） |
+| `CITEPILOT_CORPUS_ROOT` | 路径 | 网关托管的静态语料根目录（默认 `../corpus`） |
+| `gateway.corpus.enabled` | `true` / `false` | 关掉则 `/corpus/**` 交给 nginx / CDN |
 
 降级路径全部写进 trace 的 `degraded` 字段，`cli stats` 能直接看到分布 —— **降级链不是文档里的一句话，是有计数的代码路径。**

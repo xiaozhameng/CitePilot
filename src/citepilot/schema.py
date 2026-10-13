@@ -12,6 +12,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass, field, asdict
 from typing import Any
+from urllib.parse import quote
 
 
 @dataclass
@@ -28,16 +29,40 @@ class Chunk:
     kind: str = "prose"    # prose | figure_caption | term | qa
     order: int = 0         # 在全书中的顺序，用于稳定排序
 
+    # ---- 文档维度：支持多份文档之后才有这三个字段 ----
+    # 为什么必须加：只有「章节」概念时，两份文档的第 3 章会撞在一起，
+    # 引用标签分不清「第 3 章」是哪本书的，anchor 也会指向错误的深链。
+    doc_id: str = "payment-handbook"   # 来自哪份文档；内置语料固定用它
+    doc_name: str = ""                 # 文档显示名；内置语料留空（标签里不加前缀）
+    origin: str = "builtin"            # builtin | upload —— 决定 anchor 怎么生成
+
     @property
     def label(self) -> str:
-        """人类可读的出处标签，直接进答案里的引用角标。"""
+        """人类可读的出处标签，直接进答案里的引用角标。
+
+        两条分支不是冗余，是刻意的：
+        · 上传的文档没有「章」的概念，出处就是「文档名 · 小节」；
+        · 内置语料必须保持原格式不动 —— 57 条评测集、已有的引用展示、
+          文档里的示例输出全都依赖「第 3 章 支付体系 · 3.1 ...」这个形状。
+        """
+        if self.origin == "upload":
+            if self.section_title:
+                return f"{self.doc_name} · {self.section_title}"
+            return self.doc_name or "未命名文档"
         if self.section_title:
             return f"{self.chapter_no} {self.chapter_title} · {self.section_title}"
         return f"{self.chapter_no} {self.chapter_title}"
 
     @property
     def anchor(self) -> str:
-        """引用深链：点一下就能跳到电子书对应章节。"""
+        """引用深链：点一下就能跳到原文。
+
+        内置语料有静态 HTML，直接给章节锚点；
+        上传的文档没有可点的网页，所以指向内核的原文接口 —— 点开能看到那一段原文。
+        （这个接口存在的唯一理由就是让「引用可追溯」这件事对上传文档同样成立。）
+        """
+        if self.origin == "upload":
+            return f"/v1/kb/documents/{quote(self.doc_id)}/raw?chunk={quote(self.chunk_id)}"
         return f"corpus/payment-handbook/index.html#{self.chapter_id}"
 
     def to_dict(self) -> dict[str, Any]:

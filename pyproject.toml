@@ -11,10 +11,20 @@ dependencies = [
     "rich",
     "fastapi",
     "uvicorn",
+    # FastAPI 的 UploadFile / File(...) 靠它解析 multipart。
+    # 不写进依赖的后果是「本机跑得通、新克隆起不来」——
+    # 而且报错发生在 create_app 阶段（路由注册时），
+    # 表现为"内核连启动都启动不了"，看起来像代码坏了，其实是少个包。
+    "python-multipart",
     "beautifulsoup4",
     "lxml",
     "numpy",
     "jieba",
+    # 文档抽取按格式懒加载（见 kb.py），但依赖必须显式声明 ——
+    # 否则只上传 md 的人永远发现不了缺 PDF 依赖，
+    # 直到某天传了份 PDF 才炸。
+    "pypdf",
+    "python-docx",
 ]
 
 [project.optional-dependencies]

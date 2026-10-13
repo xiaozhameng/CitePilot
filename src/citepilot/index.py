@@ -107,3 +107,33 @@ class SearchIndex:
 
 def default_chunks_path() -> Path:
     return SETTINGS.corpus_dir / "chunks.jsonl"
+
+
+def load_all_chunks(include_kb: bool = True) -> list[Chunk]:
+    """汇总「内置语料 + 上传的知识库」，作为检索用的完整语料。
+
+    为什么每次都从磁盘重读，而不是把上次的结果增量拼上去？
+    因为 BM25 的 IDF 依赖**全局词频** —— 少读一份文档，所有词的权重都是错的。
+    重读几百行 jsonl 只要几十毫秒，换来的是"索引内容与磁盘永远一致"。
+
+    顺序上内置语料在前、上传文档在后：order 字段用于稳定排序，
+    保持这个顺序可以让已有问题召回结果的次序不受上传行为影响。
+    """
+    from .ingest import load_chunks
+
+    chunks = load_chunks(default_chunks_path())
+    for c in chunks:
+        # 兼容早期版本的 chunks.jsonl（那时还没有文档维度字段）
+        if not c.doc_id:
+            c.doc_id = "payment-handbook"
+        if not c.origin:
+            c.origin = "builtin"
+
+    if include_kb:
+        from .kb import KnowledgeBase
+
+        chunks.extend(KnowledgeBase().load_chunks())
+
+    for i, c in enumerate(chunks, 1):
+        c.order = i
+    return chunks

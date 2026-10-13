@@ -6,6 +6,9 @@
 var/
 corpus/payment-handbook/chunks.jsonl
 corpus/payment-handbook/emb_cache/
+# 手动上传的知识库。这是用户自己的资料，不该跟着代码进仓库。
+# 目录本身不用占位文件：KnowledgeBase.__init__ 会自己 mkdir（parents=True）。
+data/
 
 # ---- Java 网关 ----
 # Maven 编译产物。25MB 的 fat jar 提交进仓库没有任何意义，

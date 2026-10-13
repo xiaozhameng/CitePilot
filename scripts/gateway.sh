@@ -23,7 +23,8 @@ fi
 JAR="$ROOT/gateway/target/citepilot-gateway-0.1.0.jar"
 if [ ! -f "$JAR" ]; then
   echo "还没有打包。先执行：" >&2
-  echo "  cd $ROOT/gateway && mvn package -DskipTests" >&2
+  echo "  $ROOT/scripts/build.sh" >&2
+  echo "（这个脚本会自己加载 Java 工具链，不需要你先配 PATH）" >&2
   exit 1
 fi
 

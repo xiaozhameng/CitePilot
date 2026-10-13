@@ -1,17 +1,21 @@
 """命令行入口。用 argparse 而不是 Typer，是为了少一个依赖 ——
 这个项目要能在任何时候 `python -m citepilot.cli` 直接跑起来。
 
-四个子命令，正好对应开发与演示的四个动作：
-  doctor   体检：模型、向量、精排、语料各自能不能用（对应"降级链"是否生效）
-  build    建索引：切语料 + 建 BM25 + 建向量
-  ask      问一个问题（演示主用）
-  stats    看聚合指标（P95 / 成本 / 降级分布）
+子命令对应开发与演示的各个动作：
+  doctor    体检：模型、向量、精排、语料各自能不能用（对应"降级链"是否生效）
+  build     建内置语料的索引：切语料 + 建 BM25 + 建向量 + 生成评测集
+  ask       问一个问题（演示主用）
+  chat      交互式问答
+  stats     看聚合指标（P95 / 成本 / 降级分布）
+  kb        管理手动上传的知识库：list / add / rm / rebuild
+  serve     把内核起成 HTTP + SSE 服务
 """
 
 from __future__ import annotations
 
 import argparse
 import sys
+from pathlib import Path
 
 from rich.console import Console
 from rich.panel import Panel
@@ -19,7 +23,7 @@ from rich.table import Table
 
 from .config import SETTINGS
 from .index import SearchIndex, default_chunks_path
-from .ingest import build_chunks, extract_glossary, extract_quiz, load_chunks, save_chunks
+from .ingest import build_chunks, extract_glossary, extract_quiz, save_chunks
 from .schema import Answer
 from .trace import TraceStore
 
@@ -27,15 +31,21 @@ console = Console()
 
 
 def _load_or_build_index(rebuild: bool = False) -> SearchIndex:
+    """构建检索索引。语料 = 内置手册 + 手动上传的知识库。
+
+    注意这里走 load_all_chunks() 而不是只读内置那一份 ——
+    否则命令行问答看不到上传的文档、只有 HTTP 服务端能看见，
+    这种「同一份数据两种行为」的 bug 最容易在演示时当众出丑。
+    """
     path = default_chunks_path()
     if rebuild or not path.exists():
         src = SETTINGS.corpus_dir / "index.html"
         chunks = build_chunks(src)
         save_chunks(chunks, path)
-        console.print(f"[dim]已切分语料：{len(chunks)} 个 Chunk → {path}[/dim]")
-    else:
-        chunks = load_chunks(path)
-    return SearchIndex(chunks)
+        console.print(f"[dim]已切分内置语料：{len(chunks)} 个 Chunk → {path}[/dim]")
+    from .index import load_all_chunks
+
+    return SearchIndex(load_all_chunks())
 
 
 # ---------------- doctor ----------------
@@ -223,6 +233,92 @@ def cmd_stats(_args: argparse.Namespace) -> int:
     return 0
 
 
+# ---------------- kb（手动上传的知识库） ----------------
+def _human_size(n: int) -> str:
+    for unit in ("B", "KB", "MB", "GB"):
+        if n < 1024 or unit == "GB":
+            return f"{n:.0f} {unit}" if unit == "B" else f"{n:.1f} {unit}"
+        n /= 1024.0
+    return f"{n:.1f} GB"
+
+
+def _rebuild_and_report(no_vectors: bool = False) -> None:
+    """重建索引并打印构成。命令行里建完就用完扔掉 —— 常驻的那个在 serve 进程里。"""
+    from .index import load_all_chunks
+
+    chunks = load_all_chunks()
+    idx = SearchIndex(chunks, build_vectors=not no_vectors)
+    console.print(f"[green]{idx.describe()}[/green]")
+
+
+def cmd_kb(args: argparse.Namespace) -> int:
+    from .kb import KnowledgeBase
+
+    kb = KnowledgeBase()
+    action = args.kb_action
+
+    if action == "list":
+        docs = kb.list_documents()
+        if not docs:
+            console.print("[yellow]知识库里还没有上传的文档。[/yellow]")
+            console.print(f"[dim]上传：citepilot kb add <文件路径>[/dim]")
+            console.print(f"[dim]目录：{kb.root}[/dim]")
+            return 0
+        t = Table(title=f"知识库：{len(docs)} 份文档，合计 {sum(d.chunk_count for d in docs)} 块")
+        t.add_column("doc_id", style="bold")
+        t.add_column("文档名")
+        t.add_column("格式")
+        t.add_column("块数", justify="right")
+        t.add_column("大小", justify="right")
+        t.add_column("上传时间", style="dim")
+        for d in docs:
+            t.add_row(d.doc_id, d.name, d.suffix, str(d.chunk_count),
+                      _human_size(d.size), d.added_at)
+        console.print(t)
+        console.print(f"[dim]目录：{kb.root}[/dim]")
+        return 0
+
+    if action == "add":
+        added = 0
+        for raw in args.files:
+            path = Path(raw).expanduser()
+            if not path.exists():
+                console.print(f"[red]找不到文件：{path}[/red]")
+                continue
+            try:
+                info = kb.add_document(path.name, path.read_bytes())
+            except ValueError as exc:
+                console.print(f"[red]{exc}[/red]")
+                continue
+            added += 1
+            console.print(
+                f"[green]已入库[/green] [bold]{info.doc_id}[/bold] "
+                f"← {info.name}（{info.chunk_count} 块）"
+            )
+        if not added:
+            return 1
+        console.print("[dim]重建索引中（原有文档的向量会命中缓存，只有新块要算）…[/dim]")
+        _rebuild_and_report(args.no_vectors)
+        return 0
+
+    if action == "rm":
+        if not kb.remove_document(args.doc_id):
+            console.print(f"[red]知识库里没有「{args.doc_id}」[/red]")
+            return 1
+        console.print(f"[green]已移除[/green] {args.doc_id}")
+        _rebuild_and_report()
+        return 0
+
+    if action == "rebuild":
+        _rebuild_and_report(args.no_vectors)
+        docs = kb.list_documents()
+        console.print(f"[dim]语料构成：内置手册 + {len(docs)} 份上传文档[/dim]")
+        return 0
+
+    console.print(f"[red]未知操作：{action}[/red]")
+    return 1
+
+
 # ---------------- serve ----------------
 def cmd_serve(args: argparse.Namespace) -> int:
     """把内核起成常驻服务。CLI 和 HTTP 两种用法共用同一套逻辑，
@@ -256,6 +352,20 @@ def main(argv: list[str] | None = None) -> int:
 
     sub.add_parser("chat", help="交互式问答").set_defaults(func=cmd_chat)
     sub.add_parser("stats", help="查看聚合指标").set_defaults(func=cmd_stats)
+
+    k = sub.add_parser("kb", help="管理手动上传的知识库")
+    ksub = k.add_subparsers(dest="kb_action", required=True)
+    ksub.add_parser("list", help="列出已入库的文档").set_defaults(func=cmd_kb)
+    ka = ksub.add_parser("add", help="上传文档入库（可一次给多个）")
+    ka.add_argument("files", nargs="+", help="文件路径，支持 md / txt / html / pdf / docx")
+    ka.add_argument("--no-vectors", action="store_true", help="只建 BM25，不建向量")
+    ka.set_defaults(func=cmd_kb)
+    kr = ksub.add_parser("rm", help="从知识库移除一份文档")
+    kr.add_argument("doc_id", help="文档 id（用 kb list 查看）")
+    kr.set_defaults(func=cmd_kb)
+    krb = ksub.add_parser("rebuild", help="重建索引（内置语料 + 上传文档）")
+    krb.add_argument("--no-vectors", action="store_true", help="只建 BM25，不建向量")
+    krb.set_defaults(func=cmd_kb)
 
     s = sub.add_parser("serve", help="把内核起成 HTTP + SSE 服务（供 Java 网关或网页调用）")
     s.add_argument("--host", default=None, help="默认 127.0.0.1，只监听本机")

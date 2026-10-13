@@ -53,7 +53,8 @@ class Settings:
 
     # 路径
     root: Path
-    corpus_dir: Path
+    corpus_dir: Path      # 内置语料（那本支付手册）
+    kb_dir: Path          # 手动上传的知识库
     db_path: Path
 
     @property
@@ -71,6 +72,7 @@ class Settings:
 
 def load_settings() -> Settings:
     corpus = Path(_env("CITEPILOT_CORPUS_DIR", "corpus/payment-handbook"))
+    kb = Path(_env("CITEPILOT_KB_DIR", "data/kb"))
     db = Path(_env("CITEPILOT_DB_PATH", "var/citepilot.db"))
     return Settings(
         api_key=_env("CITEPILOT_API_KEY"),
@@ -91,6 +93,7 @@ def load_settings() -> Settings:
         price_out_per_m=float(_env("CITEPILOT_PRICE_OUT_PER_M", "2.0")),
         root=ROOT,
         corpus_dir=corpus if corpus.is_absolute() else ROOT / corpus,
+        kb_dir=kb if kb.is_absolute() else ROOT / kb,
         db_path=db if db.is_absolute() else ROOT / db,
     )
 

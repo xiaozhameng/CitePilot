@@ -50,12 +50,17 @@ from .config import SETTINGS
 
 # 只在装了 web 依赖时才 import，避免没装的人连 CLI 都用不了
 try:
-    from fastapi import FastAPI, Header, HTTPException, Query
+    from fastapi import FastAPI, File, Header, HTTPException, Query, UploadFile
     from fastapi.middleware.cors import CORSMiddleware
     from fastapi.responses import StreamingResponse
     _HAS_FASTAPI = True
 except ImportError:  # pragma: no cover
     _HAS_FASTAPI = False
+
+# 单份上传的大小上限。用意不是省磁盘，而是拦住"传错文件"这类误操作
+# （比如把一整个数据集的压缩包传上来）。超了直接 413，不进解析环节 ——
+# 解析一个几百 MB 的文件会让内核占住 CPU 几十秒，把同时进行的问答一起拖慢。
+MAX_UPLOAD_BYTES = 32 * 1024 * 1024
 
 
 # ------------------------------------------------------------------
@@ -77,12 +82,30 @@ class _Runtime:
         if self._index is None:
             with self._lock:
                 if self._index is None:  # 双检锁：避免两个请求同时建索引
-                    from .index import SearchIndex, default_chunks_path
-                    from .ingest import load_chunks
-
-                    chunks = load_chunks(default_chunks_path())
-                    self._index = SearchIndex(chunks)
+                    self._index = self._build()
         return self._index
+
+    @staticmethod
+    def _build():
+        """构建一份完整索引：内置语料 + 上传的知识库，放在一起算。"""
+        from .index import SearchIndex, load_all_chunks
+
+        return SearchIndex(load_all_chunks())
+
+    def rebuild(self) -> tuple[int, str]:
+        """重建索引并原子替换，返回（块数, 索引描述）。
+
+        为什么是「先构建新对象、再替换引用」，而不是就地清空重建？
+        因为重建要跑 jieba 分词建 BM25、还要对新增的块调一次 embedding，
+        耗时从几百毫秒到几秒不等。就地重建意味着这期间每个检索请求
+        都会看到一个半成品索引（甚至是空的）。
+        构建新对象、最后替换引用 —— 正在处理的请求继续用旧对象跑完。
+        Python 的引用赋值本身是原子的，这是最省事也最不容易出错的热更新。
+        """
+        idx = self._build()
+        with self._lock:
+            self._index = idx
+        return len(idx.chunks), idx.describe()
 
     def new_pilot(self):
         """每个请求一个新的 CitePilot：它持有 history 等可变状态，不能共享。"""
@@ -150,13 +173,20 @@ def create_app() -> "FastAPI":
     @app.get("/health")
     def health(x_internal_token: str | None = Header(default=None)) -> dict:
         _auth(x_internal_token)
+        from .kb import KnowledgeBase
+
         idx = RT.index
+        kb_docs = KnowledgeBase().list_documents()
         return {
             "ok": True,
             "uptime_s": round(time.time() - RT.started_at, 1),
             "requests": RT.requests,
             "errors": RT.errors,
             "index": idx.describe(),
+            "kb": {
+                "documents": len(kb_docs),
+                "chunks": sum(d.chunk_count for d in kb_docs),
+            },
             "llm": {
                 "configured": SETTINGS.has_llm,
                 "model": SETTINGS.model,
@@ -252,6 +282,96 @@ def create_app() -> "FastAPI":
                 "X-Accel-Buffering": "no",
             },
         )
+
+    # ---------------- 知识库：上传 / 列表 / 删除 / 重建 / 原文 ----------------
+    @app.get("/v1/kb/documents")
+    def kb_list(x_internal_token: str | None = Header(default=None)) -> dict:
+        _auth(x_internal_token)
+        from .kb import SUPPORTED_SUFFIXES, KnowledgeBase
+
+        docs = KnowledgeBase().list_documents()
+        return {
+            "documents": [d.to_dict() for d in docs],
+            "total_chunks": sum(d.chunk_count for d in docs),
+            "supported_suffixes": sorted(SUPPORTED_SUFFIXES),
+        }
+
+    @app.post("/v1/kb/documents")
+    def kb_upload(
+        file: UploadFile = File(...),
+        rebuild: bool = Query(default=True, description="上传后是否立即重建索引"),
+        x_internal_token: str | None = Header(default=None),
+    ) -> dict:
+        """上传一份文档入库。
+
+        默认「上传后立即重建」—— 否则用户传完提问却召不回，会以为功能坏了。
+        重建走的是「先建新对象、再替换引用」，所以重建期间问答照常可用；
+        这一刻之前已发出的请求仍用旧索引，这正是期望的行为（不中断在途请求）。
+        """
+        _auth(x_internal_token)
+        from .kb import KnowledgeBase
+
+        data = file.file.read()
+        if len(data) > MAX_UPLOAD_BYTES:
+            raise HTTPException(
+                status_code=413,
+                detail=f"文件 {len(data) / 1048576:.1f}MB，超过单份上限 "
+                       f"{MAX_UPLOAD_BYTES // 1048576}MB",
+            )
+        name = file.filename or "未命名文件"
+        try:
+            info = KnowledgeBase().add_document(name, data)
+        except ValueError as exc:
+            raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+        out: dict = {"document": info.to_dict(), "rebuild": None}
+        if rebuild:
+            n, desc = RT.rebuild()
+            out["rebuild"] = {"chunks": n, "index": desc}
+        return out
+
+    @app.delete("/v1/kb/documents/{doc_id}")
+    def kb_delete(
+        doc_id: str,
+        rebuild: bool = Query(default=True),
+        x_internal_token: str | None = Header(default=None),
+    ) -> dict:
+        _auth(x_internal_token)
+        from .kb import KnowledgeBase
+
+        if not KnowledgeBase().remove_document(doc_id):
+            raise HTTPException(status_code=404, detail=f"知识库里没有「{doc_id}」")
+        out: dict = {"removed": doc_id, "rebuild": None}
+        if rebuild:
+            n, desc = RT.rebuild()
+            out["rebuild"] = {"chunks": n, "index": desc}
+        return out
+
+    @app.post("/v1/kb/rebuild")
+    def kb_rebuild(x_internal_token: str | None = Header(default=None)) -> dict:
+        """手动重建。手改过语料文件、或上传时跳过了重建，用它补一次。"""
+        _auth(x_internal_token)
+        n, desc = RT.rebuild()
+        return {"ok": True, "chunks": n, "index": desc}
+
+    @app.get("/v1/kb/documents/{doc_id}/raw")
+    def kb_raw(
+        doc_id: str,
+        chunk: str = Query(default="", description="块 id，来自引用里的 anchor"),
+        x_internal_token: str | None = Header(default=None),
+    ) -> dict:
+        """引用深链的落地页：给上传文档的引用一个能点开的原文。
+
+        上传的文档没有静态网页可跳。如果 anchor 留空，
+        「答案必带出处」这条承诺对上传文档就是句空话。
+        """
+        _auth(x_internal_token)
+        from .kb import KnowledgeBase
+
+        item = KnowledgeBase().raw_chunk(doc_id, chunk)
+        if item is None:
+            raise HTTPException(status_code=404, detail="找不到这份文档或这个块")
+        return item
 
     # ---------------- 聚合指标 ----------------
     @app.get("/v1/stats")

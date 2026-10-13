@@ -7,9 +7,13 @@ import com.fasterxml.jackson.databind.ObjectMapper;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 import org.springframework.core.ParameterizedTypeReference;
+import org.springframework.core.io.buffer.DataBuffer;
 import org.springframework.http.MediaType;
+import org.springframework.http.client.MultipartBodyBuilder;
 import org.springframework.http.codec.ServerSentEvent;
+import org.springframework.http.codec.multipart.FilePart;
 import org.springframework.stereotype.Service;
+import org.springframework.web.reactive.function.BodyInserters;
 import org.springframework.web.reactive.function.client.WebClient;
 import reactor.core.publisher.Flux;
 import reactor.core.publisher.Mono;
@@ -42,6 +46,15 @@ public class KernelClient {
      */
     private static final ParameterizedTypeReference<ServerSentEvent<String>> SSE_TYPE =
             new ParameterizedTypeReference<>() {};
+
+    /**
+     * 上传加上重建索引的耗时上限。
+     *
+     * <p>为什么给得这么宽？因为内核在上传之后会**全量重建索引**，
+     * 其中包含对新块的 embedding 调用 —— 一份几百页的 PDF 能切出上千块，
+     * 逐个算向量要几十秒。这个超时只是兜底，正常上传在几秒内返回。
+     */
+    private static final Duration UPLOAD_TIMEOUT = Duration.ofSeconds(180);
 
     private final WebClient client;
     private final ObjectMapper mapper;
@@ -87,6 +100,67 @@ public class KernelClient {
     /** 内核健康状态。 */
     public Mono<JsonNode> health() {
         return client.get().uri("/health").retrieve().bodyToMono(JsonNode.class);
+    }
+
+    // ------------------------------------------------------------------
+    // 知识库。网关在这一层只做转发，不解析任何文档格式 ——
+    // "支持哪些格式"这个知识只应该存在于内核里，存在两处必然会有一天对不上。
+    // ------------------------------------------------------------------
+
+    /** 已入库的文档清单。 */
+    public Mono<JsonNode> kbList() {
+        return client.get().uri("/v1/kb/documents").retrieve().bodyToMono(JsonNode.class);
+    }
+
+    /**
+     * 上传一份文档。
+     *
+     * <p>用 {@code asyncPart} 而不是 {@code part}：前者把 {@code FilePart} 的
+     * content 流直接接到出站请求上，整份文件不会被读进内存再写出。
+     * 换成 {@code part(...)} 就需要先把内容收集成 byte[]，
+     * 在传 PDF 那种体积上会直接把堆撑大。
+     */
+    public Mono<JsonNode> kbUpload(FilePart file, boolean rebuild) {
+        MultipartBodyBuilder builder = new MultipartBodyBuilder();
+        builder.asyncPart("file", file.content(), DataBuffer.class)
+                .filename(file.filename());
+
+        return client.post()
+                .uri(uriBuilder -> uriBuilder.path("/v1/kb/documents")
+                        .queryParam("rebuild", rebuild).build())
+                .contentType(MediaType.MULTIPART_FORM_DATA)
+                .body(BodyInserters.fromMultipartData(builder.build()))
+                .retrieve()
+                .bodyToMono(JsonNode.class)
+                .timeout(UPLOAD_TIMEOUT);
+    }
+
+    /** 移除一份文档。 */
+    public Mono<JsonNode> kbDelete(String docId, boolean rebuild) {
+        return client.delete()
+                .uri(uriBuilder -> uriBuilder.path("/v1/kb/documents/{id}")
+                        .queryParam("rebuild", rebuild).build(docId))
+                .retrieve()
+                .bodyToMono(JsonNode.class)
+                .timeout(UPLOAD_TIMEOUT);
+    }
+
+    /** 手动重建索引。 */
+    public Mono<JsonNode> kbRebuild() {
+        return client.post()
+                .uri("/v1/kb/rebuild")
+                .retrieve()
+                .bodyToMono(JsonNode.class)
+                .timeout(UPLOAD_TIMEOUT);
+    }
+
+    /** 某一块的原文（引用深链的落地页）。 */
+    public Mono<JsonNode> kbRaw(String docId, String chunkId) {
+        return client.get()
+                .uri(uriBuilder -> uriBuilder.path("/v1/kb/documents/{id}/raw")
+                        .queryParam("chunk", chunkId).build(docId))
+                .retrieve()
+                .bodyToMono(JsonNode.class);
     }
 
     /**
