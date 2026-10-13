@@ -1,0 +1,671 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>CitePilot · 带出处的知识问答</title>
+<style>
+  :root{
+    --bg:#0d1117; --panel:#161b22; --panel2:#1c2128; --border:#30363d;
+    --text:#e6edf3; --muted:#8b949e; --dim:#6e7681;
+    --accent:#58a6ff; --accent-dim:#1f6feb; --ok:#3fb950; --warn:#d29922; --err:#f85149;
+    --purple:#bc8cff; --teal:#39c5cf;
+    --mono:ui-monospace,SFMono-Regular,"SF Mono",Menlo,Consolas,monospace;
+  }
+  *{box-sizing:border-box}
+  html,body{height:100%}
+  body{
+    margin:0; background:var(--bg); color:var(--text);
+    font:14px/1.6 -apple-system,BlinkMacSystemFont,"Segoe UI","PingFang SC","Hiragino Sans GB","Microsoft YaHei",sans-serif;
+    display:flex; flex-direction:column; overflow:hidden;
+  }
+  /* ---------- 顶栏 ---------- */
+  header{
+    display:flex; align-items:center; gap:14px; padding:10px 18px;
+    border-bottom:1px solid var(--border); background:var(--panel); flex:0 0 auto;
+  }
+  .logo{display:flex;align-items:center;gap:9px;font-weight:650;letter-spacing:.2px}
+  .logo .dot{
+    width:9px;height:9px;border-radius:50%;background:var(--accent);
+    box-shadow:0 0 10px var(--accent); animation:pulse 2.4s infinite;
+  }
+  @keyframes pulse{0%,100%{opacity:1}50%{opacity:.35}}
+  .logo small{color:var(--muted);font-weight:400;font-size:12px;letter-spacing:0}
+  .spacer{flex:1}
+  .ctl{display:flex;align-items:center;gap:7px;font-size:12px;color:var(--muted)}
+  select,button,input,textarea{font-family:inherit;font-size:13px}
+  select{
+    background:var(--panel2);color:var(--text);border:1px solid var(--border);
+    border-radius:6px;padding:5px 8px;outline:none;cursor:pointer;
+  }
+  select:focus{border-color:var(--accent-dim)}
+  .toggle{display:flex;align-items:center;gap:5px;cursor:pointer;user-select:none}
+  .toggle input{accent-color:var(--accent);cursor:pointer}
+  .badge{
+    display:inline-flex;align-items:center;gap:5px;padding:3px 9px;border-radius:999px;
+    font-size:11.5px;border:1px solid var(--border);background:var(--panel2);color:var(--muted);
+  }
+  .badge.ok{color:var(--ok);border-color:#238636}
+  .badge.err{color:var(--err);border-color:#6e2a2a}
+
+  /* ---------- 主体 ---------- */
+  main{flex:1;display:flex;min-height:0}
+  .chat{flex:1;display:flex;flex-direction:column;min-width:0}
+  .stream{flex:1;overflow-y:auto;padding:22px 26px 10px;scroll-behavior:smooth}
+  aside{
+    flex:0 0 380px;border-left:1px solid var(--border);background:var(--panel);
+    display:flex;flex-direction:column;overflow-y:auto;
+  }
+
+  /* ---------- 消息 ---------- */
+  .msg{margin-bottom:22px;max-width:900px}
+  .msg.user .bubble{
+    background:linear-gradient(135deg,#1f6feb22,#1f6feb11);border:1px solid #1f6feb55;
+    border-radius:12px;padding:11px 15px;display:inline-block;
+  }
+  .msg .who{font-size:11.5px;color:var(--dim);margin-bottom:6px;letter-spacing:.4px;text-transform:uppercase}
+  .answer{white-space:pre-wrap;word-break:break-word;font-size:14.5px;line-height:1.85}
+  .answer .cursor{
+    display:inline-block;width:7px;height:15px;background:var(--accent);
+    vertical-align:-2px;animation:blink .9s steps(1) infinite;
+  }
+  @keyframes blink{50%{opacity:0}}
+
+  /* 引用角标 */
+  .cite{
+    display:inline-flex;align-items:center;justify-content:center;
+    min-width:17px;height:17px;padding:0 4px;margin:0 2px;border-radius:4px;
+    background:#1f6feb33;border:1px solid #1f6feb66;color:#79c0ff;
+    font-size:11px;font-weight:600;vertical-align:1px;cursor:pointer;
+    transition:background .15s,transform .15s;
+  }
+  .cite:hover{background:#1f6feb66;transform:translateY(-1px)}
+  .cite.flash{background:var(--accent);color:#fff;border-color:var(--accent)}
+
+  /* 思考中 */
+  .thinking{
+    font-family:var(--mono);font-size:11.5px;color:var(--dim);
+    background:#0d1117;border:1px dashed var(--border);border-radius:8px;
+    padding:8px 11px;max-height:88px;overflow:hidden;margin-bottom:10px;
+    line-height:1.55;
+  }
+  .thinking b{color:var(--purple);font-weight:500}
+
+  /* 阶段进度 */
+  .stages{display:flex;flex-wrap:wrap;gap:6px;margin:9px 0 12px}
+  .stage{
+    font-family:var(--mono);font-size:11px;padding:3px 9px;border-radius:6px;
+    background:var(--panel2);border:1px solid var(--border);color:var(--muted);
+    animation:slideIn .3s ease;
+  }
+  .stage b{color:var(--teal);font-weight:600}
+  .stage.warn b{color:var(--warn)}
+  .stage.ok b{color:var(--ok)}
+  @keyframes slideIn{from{opacity:0;transform:translateY(-4px)}to{opacity:1;transform:none}}
+
+  /* 出处卡片 */
+  .sources{margin-top:16px;border-top:1px solid var(--border);padding-top:13px}
+  .sources h4{
+    margin:0 0 10px;font-size:11.5px;color:var(--dim);font-weight:600;
+    letter-spacing:.7px;text-transform:uppercase;
+  }
+  .src{
+    display:flex;gap:11px;padding:9px 11px;border-radius:8px;margin-bottom:7px;
+    background:var(--panel2);border:1px solid var(--border);transition:border-color .2s,background .2s;
+  }
+  .src:hover{border-color:var(--accent-dim)}
+  .src.flash{border-color:var(--accent);background:#1f6feb1a}
+  .src .n{
+    flex:0 0 21px;height:21px;border-radius:5px;background:#1f6feb33;color:#79c0ff;
+    display:flex;align-items:center;justify-content:center;font-size:11.5px;font-weight:700;
+  }
+  .src .body{min-width:0;flex:1}
+  .src .label{font-size:12.5px;color:var(--text);font-weight:600;margin-bottom:3px}
+  .src .quote{font-size:12px;color:var(--muted);line-height:1.6}
+  .src a{color:var(--accent);text-decoration:none;font-size:11.5px}
+  .src a:hover{text-decoration:underline}
+
+  /* 结论条 */
+  .verdict{
+    display:flex;flex-wrap:wrap;gap:7px;margin-top:13px;padding-top:11px;
+    border-top:1px dashed var(--border);font-family:var(--mono);font-size:11px;
+  }
+  .verdict span{padding:2px 8px;border-radius:5px;background:var(--panel2);border:1px solid var(--border);color:var(--muted)}
+  .verdict span.ok{color:var(--ok);border-color:#23863655}
+  .verdict span.warn{color:var(--warn);border-color:#9e6a0355}
+  .verdict span.err{color:var(--err);border-color:#8b2c2c55}
+  .verdict span b{color:inherit}
+
+  .sysnote{
+    font-size:12.5px;color:var(--warn);background:#9e6a031a;border:1px solid #9e6a0344;
+    border-radius:8px;padding:9px 12px;margin:8px 0;
+  }
+
+  /* ---------- 输入区 ---------- */
+  .composer{flex:0 0 auto;padding:12px 26px 16px;border-top:1px solid var(--border);background:var(--panel)}
+  .inputwrap{
+    display:flex;gap:9px;align-items:flex-end;background:var(--panel2);
+    border:1px solid var(--border);border-radius:11px;padding:9px 11px;transition:border-color .2s;
+  }
+  .inputwrap:focus-within{border-color:var(--accent-dim)}
+  textarea{
+    flex:1;background:transparent;border:none;outline:none;resize:none;color:var(--text);
+    font-size:14px;line-height:1.6;max-height:130px;min-height:23px;padding:0;
+  }
+  textarea::placeholder{color:var(--dim)}
+  .send{
+    flex:0 0 auto;background:var(--accent-dim);color:#fff;border:none;border-radius:8px;
+    padding:7px 17px;cursor:pointer;font-weight:600;transition:background .15s;
+  }
+  .send:hover{background:var(--accent)}
+  .send:disabled{background:#21262d;color:var(--dim);cursor:not-allowed}
+  .hints{display:flex;gap:6px;flex-wrap:wrap;margin-top:9px}
+  .hint{
+    font-size:12px;color:var(--muted);background:var(--panel2);border:1px solid var(--border);
+    border-radius:999px;padding:3px 11px;cursor:pointer;transition:all .15s;
+  }
+  .hint:hover{border-color:var(--accent-dim);color:var(--accent)}
+
+  /* ---------- 侧栏 ---------- */
+  .card{border-bottom:1px solid var(--border);padding:14px 17px}
+  .card h3{
+    margin:0 0 11px;font-size:11.5px;color:var(--dim);font-weight:600;
+    letter-spacing:.7px;text-transform:uppercase;display:flex;align-items:center;gap:7px;
+  }
+  .card h3 .line{flex:1;height:1px;background:var(--border)}
+  .kv{display:flex;justify-content:space-between;gap:10px;font-size:12.5px;padding:3px 0}
+  .kv .k{color:var(--muted)}
+  .kv .v{font-family:var(--mono);color:var(--text);text-align:right}
+  .kv .v.ok{color:var(--ok)} .kv .v.warn{color:var(--warn)} .kv .v.err{color:var(--err)}
+
+  /* 瀑布图 */
+  .wf{margin-top:4px}
+  .wfrow{display:flex;align-items:center;gap:8px;margin-bottom:5px;font-size:11.5px}
+  .wfrow .nm{flex:0 0 92px;color:var(--muted);font-family:var(--mono);overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+  .wfrow .barbox{flex:1;height:15px;background:#0d1117;border-radius:4px;overflow:hidden}
+  .wfrow .bar{height:100%;border-radius:4px;background:linear-gradient(90deg,#1f6feb,#58a6ff);transition:width .4s ease}
+  .wfrow .bar.slow{background:linear-gradient(90deg,#9e6a03,#d29922)}
+  .wfrow .bar.vslow{background:linear-gradient(90deg,#8b2c2c,#f85149)}
+  .wfrow .ms{flex:0 0 56px;text-align:right;font-family:var(--mono);color:var(--muted)}
+
+  table.mini{width:100%;border-collapse:collapse;font-size:11.5px}
+  table.mini th{text-align:left;color:var(--dim);font-weight:500;padding:3px 5px;border-bottom:1px solid var(--border)}
+  table.mini td{padding:3px 5px;font-family:var(--mono);color:var(--muted);border-bottom:1px solid #21262d}
+  table.mini tr:last-child td{border-bottom:none}
+  table.mini td.hi{color:var(--text)}
+
+  .audit{max-height:290px;overflow-y:auto;margin:-3px -4px}
+  .aitem{padding:7px 8px;border-radius:6px;margin-bottom:4px;background:var(--panel2);border:1px solid #21262d;font-size:11.5px}
+  .aitem .q{color:var(--text);margin-bottom:3px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+  .aitem .m{display:flex;gap:8px;font-family:var(--mono);color:var(--dim);font-size:10.5px;flex-wrap:wrap}
+  .aitem .m .g{color:var(--ok)} .aitem .m .r{color:var(--warn)} .aitem .m .e{color:var(--err)}
+
+  .empty{color:var(--dim);font-size:12px;padding:9px 0;text-align:center}
+  ::-webkit-scrollbar{width:9px;height:9px}
+  ::-webkit-scrollbar-track{background:transparent}
+  ::-webkit-scrollbar-thumb{background:#30363d;border-radius:5px;border:2px solid var(--bg)}
+  ::-webkit-scrollbar-thumb:hover{background:#484f58}
+  .refuse{color:var(--warn)}
+</style>
+</head>
+<body>
+
+<header>
+  <div class="logo">
+    <span class="dot"></span>
+    CitePilot <small>带出处的知识问答 · 每个结论都能点回原文</small>
+  </div>
+  <div class="spacer"></div>
+  <div class="ctl">
+    <label>召回
+      <select id="strategy">
+        <option value="hybrid">混合（BM25 + 向量 + RRF）</option>
+        <option value="bm25_only">仅 BM25</option>
+        <option value="vec_only">仅向量</option>
+      </select>
+    </label>
+  </div>
+  <div class="ctl">
+    <label class="toggle"><input type="checkbox" id="rerank" checked> 精排</label>
+  </div>
+  <span class="badge" id="healthBadge">检测中…</span>
+</header>
+
+<main>
+  <div class="chat">
+    <div class="stream" id="stream">
+      <div class="msg">
+        <div class="who">CitePilot</div>
+        <div class="answer">这个知识库收录了一份《支付通识》电子书（118 个知识块）。<br>
+问我支付领域的问题，我会给出答案，并且<b>每个结论后面都带角标</b>——点角标能跳到出处。
+如果资料里没有，我会直接说"没有"，不编。</div>
+      </div>
+    </div>
+    <div class="composer">
+      <div class="inputwrap">
+        <textarea id="input" rows="1" placeholder="问点什么…（Enter 发送，Shift+Enter 换行）"></textarea>
+        <button class="send" id="send">发送</button>
+      </div>
+      <div class="hints" id="hints"></div>
+    </div>
+  </div>
+
+  <aside>
+    <div class="card">
+      <h3>内核状态<span class="line"></span></h3>
+      <div class="kv"><span class="k">生成模型</span><span class="v" id="hLlm">—</span></div>
+      <div class="kv"><span class="k">Embedding</span><span class="v" id="hEmb">—</span></div>
+      <div class="kv"><span class="k">Rerank</span><span class="v" id="hRk">—</span></div>
+      <div class="kv"><span class="k">索引</span><span class="v" id="hIdx">—</span></div>
+      <div class="kv"><span class="k">并发位</span><span class="v" id="hSlots">—</span></div>
+    </div>
+
+    <div class="card">
+      <h3>本次链路<span class="line"></span></h3>
+      <div class="wf" id="waterfall"><div class="empty">提问后显示</div></div>
+      <div id="latencyNote"></div>
+    </div>
+
+    <div class="card">
+      <h3>聚合指标<span class="line"></span></h3>
+      <div id="stats"><div class="empty">加载中…</div></div>
+    </div>
+
+    <div class="card">
+      <h3>审计流水<span class="line"></span></h3>
+      <div class="audit" id="audit"><div class="empty">暂无记录</div></div>
+    </div>
+  </aside>
+</main>
+
+<script>
+// ============================================================
+// 状态
+// ============================================================
+const S = {
+  sessionId: null,
+  busy: false,
+  t0: 0,
+  firstByteMs: null,
+  stages: [],
+  current: null,
+};
+
+const $ = id => document.getElementById(id);
+const HINTS = [
+  "备付金是什么？为什么要集中缴存？",
+  "断直连是什么意思，对支付机构有什么影响？",
+  "二清为什么是违规的？",
+  "微信支付里的钱和商户号余额是一回事吗？",
+  "申请支付牌照需要什么条件？",
+];
+
+// ============================================================
+// 提示词
+// ============================================================
+HINTS.forEach(h => {
+  const b = document.createElement("button");
+  b.className = "hint"; b.textContent = h;
+  b.onclick = () => { $("input").value = h; $("input").focus(); };
+  $("hints").appendChild(b);
+});
+
+// ============================================================
+// 核心：SSE 客户端
+//
+// 为什么不用浏览器原生的 EventSource？
+// 因为 EventSource 只能发 GET，带不了 JSON body —— 而问题文本、
+// 召回策略这些都必须走 body。所以这里用 fetch + ReadableStream
+// 自己解析 SSE 帧。
+//
+// 解析的关键点：**网络分片不按帧边界切**。
+// 一次 read() 可能拿到半个事件，也可能拿到三个半事件。
+// 所以必须维护一个缓冲区，按 "\n\n" 切出完整帧，剩下的留着等下一片。
+// 少了这个缓冲区，表现是"偶尔丢消息/JSON 解析失败"，
+// 且只在网络抖动时复现 —— 这是 SSE 客户端最典型的 bug。
+// ============================================================
+async function askStream(question) {
+  S.busy = true; $("send").disabled = true;
+  S.t0 = performance.now(); S.firstByteMs = null; S.stages = [];
+
+  const msg = document.createElement("div");
+  msg.className = "msg";
+  msg.innerHTML = `<div class="who">CitePilot</div>
+    <div class="thinking" id="think" style="display:none"></div>
+    <div class="stages" id="stg"></div>
+    <div class="answer" id="ans"></div>
+    <div id="srcs"></div>
+    <div id="vd"></div>`;
+  $("stream").appendChild(msg);
+  $("stream").scrollTop = $("stream").scrollHeight;
+
+  const ansEl = msg.querySelector("#ans");
+  const thinkEl = msg.querySelector("#think");
+  const stgEl = msg.querySelector("#stg");
+  const srcEl = msg.querySelector("#srcs");
+  const vdEl = msg.querySelector("#vd");
+
+  let cursor = document.createElement("span");
+  cursor.className = "cursor";
+  ansEl.appendChild(cursor);
+  let raw = "";
+  let finalAnswer = null;
+
+  try {
+    const resp = await fetch("/api/ask/stream", {
+      method: "POST",
+      headers: {"Content-Type": "application/json"},
+      body: JSON.stringify({
+        question,
+        strategy: $("strategy").value,
+        use_rerank: $("rerank").checked,
+        session_id: S.sessionId,
+      }),
+    });
+
+    if (!resp.ok) {
+      const t = await resp.text();
+      throw new Error(`HTTP ${resp.status} ${t.slice(0, 200)}`);
+    }
+
+    const reader = resp.body.getReader();
+    const dec = new TextDecoder("utf-8");
+    let buf = "";
+
+    while (true) {
+      const {done, value} = await reader.read();
+      if (done) break;
+      if (S.firstByteMs === null) S.firstByteMs = Math.round(performance.now() - S.t0);
+      buf += dec.decode(value, {stream: true});
+
+      let i;
+      while ((i = buf.indexOf("\n\n")) >= 0) {
+        const frame = buf.slice(0, i);
+        buf = buf.slice(i + 2);
+        if (frame.trim()) handleFrame(frame);
+      }
+    }
+  } catch (e) {
+    cursor.remove();
+    vdEl.innerHTML = `<div class="sysnote">连接失败：${esc(e.message)}</div>`;
+  }
+
+  function handleFrame(frame) {
+    let ev = "message", data = "";
+    for (const line of frame.split(/\r?\n/)) {
+      if (line.startsWith("event:")) ev = line.slice(6).trim();
+      else if (line.startsWith("data:")) data += line.slice(5).trim();
+    }
+    if (!data) return;
+    let d; try { d = JSON.parse(data); } catch { return; }
+
+    switch (ev) {
+      case "session":
+        S.sessionId = d.sessionId;
+        break;
+
+      case "thinking":
+        thinkEl.style.display = "block";
+        lastThought = (lastThought + d.text).slice(-260);
+        thinkEl.innerHTML = `<b>思考中</b> ${esc(lastThought)}`;
+        break;
+
+      case "stage": {
+        const ms = d.ms || 0;
+        const cls = ms > 3000 ? "warn" : (d.meta && d.meta.sufficient === false ? "warn" : "");
+        const label = STAGE_LABEL[d.name] || d.name;
+        stgEl.insertAdjacentHTML("beforeend",
+          `<span class="stage ${cls}">${label} <b>${ms}ms</b></span>`);
+        S.stages.push({name: d.name, ms});
+        break;
+      }
+
+      case "route":
+        stgEl.insertAdjacentHTML("beforeend",
+          `<span class="stage">分流 → <b>${d.route}</b> · ${(d.confidence * 100).toFixed(0)}%</span>`);
+        break;
+
+      case "delta":
+        if (S.firstTextMs === undefined || S.firstTextMs === null) {
+          S.firstTextMs = Math.round(performance.now() - S.t0);
+        }
+        raw += d.text;
+        cursor.remove();
+        ansEl.insertAdjacentHTML("beforeend", renderCite(d.text));
+        ansEl.appendChild(cursor);
+        $("stream").scrollTop = $("stream").scrollHeight;
+        break;
+
+      case "revoke":
+        // 流式与引用校验冲突时，内核会发这个事件。
+        // 不能静默替换 —— 必须让用户看见"刚才那段作废了"。
+        raw = "";
+        ansEl.innerHTML = `<div class="sysnote">刚才生成的内容未通过引用校验（${esc(d.reason || "")}），正在重写…</div>`;
+        ansEl.appendChild(cursor);
+        break;
+
+      case "final_text":
+        if (d.text !== raw) {
+          raw = d.text;
+          ansEl.innerHTML = renderCite(raw);
+        }
+        cursor.remove();
+        ansEl.appendChild(cursor);
+        break;
+
+      case "verify":
+        break;
+
+      case "sources":
+        srcEl.innerHTML = renderSources(d.citations);
+        break;
+
+      case "answer":
+        finalAnswer = d.answer;
+        S.traceId = d.trace_id;
+        S.serverMs = d.server_ms;
+        break;
+
+      case "error":
+        vdEl.innerHTML = `<div class="sysnote">${esc(d.message)}</div>`;
+        break;
+    }
+  }
+
+  // ---- 收尾 ----
+  cursor.remove();
+  if (finalAnswer) {
+    vdEl.innerHTML = renderVerdict(finalAnswer, S.stages);
+    renderWaterfall(S.stages, S.firstTextMs, finalAnswer.metrics.total_ms);
+    loadStats(); loadAudit();
+  }
+  S.busy = false; $("send").disabled = false; $("input").focus();
+}
+
+const STAGE_LABEL = {
+  rule_intent: "规则分流", intent_llm: "模型分流",
+  retrieve: "检索", sufficiency: "充分性判定", rewrite: "查询改写",
+  generate: "生成", generate_repair1: "重写", generate_repair2: "重写2",
+  direct_answer: "直答",
+};
+
+// 把 [1][2] 渲染成可点角标
+function renderCite(text) {
+  return esc(text).replace(/\[(\d+)\]/g,
+    (m, n) => `<span class="cite" data-n="${n}" onclick="jumpTo(${n})">${n}</span>`);
+}
+function esc(s) {
+  return String(s ?? "").replace(/[&<>"']/g,
+    c => ({"&":"&amp;","<":"&lt;",">":"&gt;",'"':"&quot;","'":"&#39;"}[c]));
+}
+
+function renderSources(cits) {
+  if (!cits || !cits.length) return "";
+  return `<div class="sources"><h4>出处 · 点角标可定位</h4>` +
+    cits.map(c => `
+      <div class="src" id="src-${c.marker}">
+        <div class="n">${c.marker}</div>
+        <div class="body">
+          <div class="label">${esc(c.label)}</div>
+          <div class="quote">${esc((c.quote || "").slice(0, 130))}${(c.quote || "").length > 130 ? "…" : ""}</div>
+          <a href="../${esc(c.anchor)}" target="_blank" rel="noopener">查看原文 →</a>
+        </div>
+      </div>`).join("") + `</div>`;
+}
+
+function jumpTo(n) {
+  const el = document.getElementById("src-" + n);
+  if (!el) return;
+  el.scrollIntoView({behavior: "smooth", block: "center"});
+  el.classList.add("flash");
+  document.querySelectorAll(`.cite[data-n="${n}"]`).forEach(c => {
+    c.classList.add("flash"); setTimeout(() => c.classList.remove("flash"), 900);
+  });
+  setTimeout(() => el.classList.remove("flash"), 1400);
+}
+
+function renderVerdict(a, stages) {
+  const m = a.metrics || {};
+  const cost = ((m.prompt_tokens / 1e6) * 1.0 + (m.completion_tokens / 1e6) * 2.0).toFixed(6);
+  const out = [];
+  out.push(`<span class="${a.grounded ? "ok" : "err"}">引用校验 <b>${a.grounded ? "通过" : "未通过"}</b></span>`);
+  out.push(`<span>路由 <b>${a.route}</b></span>`);
+  if (a.intent) out.push(`<span>意图 <b>${a.intent}</b> ${(a.intent_confidence * 100).toFixed(0)}%</span>`);
+  out.push(`<span>自纠正 <b>${a.rewrites}</b> 次</span>`);
+  if (a.degraded) out.push(`<span class="warn">降级 <b>${esc(a.degraded)}</b></span>`);
+  out.push(`<span>入 <b>${m.prompt_tokens}</b> / 出 <b>${m.completion_tokens}</b> token</span>`);
+  out.push(`<span>成本 <b>¥${cost}</b></span>`);
+  if (S.traceId) out.push(`<span>trace <b>#${S.traceId}</b></span>`);
+  return `<div class="verdict">${out.join("")}</div>`;
+}
+
+function renderWaterfall(stages, firstTextMs, totalMs) {
+  const el = $("waterfall");
+  if (!stages || !stages.length) { el.innerHTML = `<div class="empty">无数据</div>`; return; }
+  const max = Math.max(...stages.map(s => s.ms), 1);
+  el.innerHTML = stages.map(s => {
+    const pct = Math.max(2, (s.ms / max) * 100);
+    const cls = s.ms > 4000 ? "vslow" : (s.ms > 1500 ? "slow" : "");
+    return `<div class="wfrow">
+      <span class="nm" title="${s.name}">${STAGE_LABEL[s.name] || s.name}</span>
+      <span class="barbox"><span class="bar ${cls}" style="width:${pct}%"></span></span>
+      <span class="ms">${s.ms}ms</span>
+    </div>`;
+  }).join("");
+  $("latencyNote").innerHTML = `
+    <div class="kv"><span class="k">首字延迟</span><span class="v">${firstTextMs ?? "—"} ms</span></div>
+    <div class="kv"><span class="k">端到端</span><span class="v">${totalMs ?? "—"} ms</span></div>`;
+}
+
+// ============================================================
+// 侧栏数据
+// ============================================================
+async function loadHealth() {
+  try {
+    const r = await fetch("/api/health"); const d = await r.json();
+    const k = d.kernel || {};
+    const b = $("healthBadge");
+    if (d.ok) { b.className = "badge ok"; b.textContent = "● 内核在线"; }
+    else { b.className = "badge err"; b.textContent = "● 内核离线"; }
+    $("hLlm").textContent = (k.llm && k.llm.configured) ? k.llm.model.replace("openai/", "") : "未配置";
+    $("hLlm").className = "v " + ((k.llm && k.llm.configured) ? "ok" : "warn");
+    $("hEmb").textContent = k.embed ? `${k.embed.provider}` : "—";
+    $("hEmb").className = "v ok";
+    $("hRk").textContent = k.rerank ? k.rerank.provider : "—";
+    $("hRk").className = "v " + (k.rerank && k.rerank.provider !== "none" ? "ok" : "warn");
+    $("hIdx").textContent = k.index ? k.index.split("|")[0].trim() : "—";
+    const g = d.gateway || {};
+    $("hSlots").textContent = `${g.streamSlotsAvailable ?? "—"} / ${g.streamSlotsMax ?? "—"}`;
+  } catch (e) {
+    const b = $("healthBadge"); b.className = "badge err"; b.textContent = "● 网关异常";
+  }
+}
+
+async function loadStats() {
+  try {
+    const r = await fetch("/api/stats"); const d = await r.json();
+    const k = d.kernel || {};
+    if (!k.total) { $("stats").innerHTML = `<div class="empty">还没有问答记录</div>`; return; }
+    const rows = [
+      ["问答次数", k.total, ""],
+      ["P50 延迟", k.p50_ms + " ms", ""],
+      ["P95 延迟", k.p95_ms + " ms", k.p95_ms > 20000 ? "warn" : ""],
+      ["平均延迟", Math.round(k.avg_ms) + " ms", ""],
+      ["单次成本", "¥" + (k.cost_per_ask_cny ?? 0).toFixed(5), ""],
+      ["引用未通过", k.ungrounded, k.ungrounded > 0 ? "warn" : "ok"],
+      ["触发降级", k.degraded_n, k.degraded_n > 0 ? "warn" : "ok"],
+      ["改写合计", k.rewrites, ""],
+    ];
+    $("stats").innerHTML = rows.map(([kk, vv, cc]) =>
+      `<div class="kv"><span class="k">${kk}</span><span class="v ${cc}">${vv}</span></div>`).join("");
+  } catch (e) { $("stats").innerHTML = `<div class="empty">指标加载失败</div>`; }
+}
+
+async function loadAudit() {
+  try {
+    const r = await fetch("/api/recent?limit=25"); const d = await r.json();
+    const items = d.items || [];
+    if (!items.length) { $("audit").innerHTML = `<div class="empty">暂无记录</div>`; return; }
+    $("audit").innerHTML = items.map(it => {
+      const t = new Date(it.gatewayTs).toLocaleTimeString("zh-CN", {hour12: false});
+      const cls = it.ok ? (it.grounded ? "g" : "r") : "e";
+      return `<div class="aitem">
+        <div class="q" title="${esc(it.question)}">${esc(it.question)}</div>
+        <div class="m">
+          <span>${t}</span>
+          <span class="${cls}">${it.ok ? (it.grounded ? "✓可信" : "⚠降级") : "✗失败"}</span>
+          <span>${it.route || "-"}</span>
+          <span>${it.totalMs || it.latencyMs || 0}ms</span>
+          <span>引${it.citationCount ?? 0}</span>
+          ${it.streamed ? "<span>SSE</span>" : ""}
+          ${it.aborted ? "<span>中断</span>" : ""}
+        </div>
+      </div>`;
+    }).join("");
+  } catch (e) { $("audit").innerHTML = `<div class="empty">审计加载失败</div>`; }
+}
+
+// ============================================================
+// 交互
+// ============================================================
+let lastThought = "";
+const ta = $("input");
+ta.addEventListener("input", () => {
+  ta.style.height = "auto";
+  ta.style.height = Math.min(ta.scrollHeight, 130) + "px";
+});
+ta.addEventListener("keydown", e => {
+  if (e.key === "Enter" && !e.shiftKey) { e.preventDefault(); send(); }
+});
+$("send").onclick = send;
+
+function send() {
+  const q = ta.value.trim();
+  if (!q || S.busy) return;
+  lastThought = "";
+  const um = document.createElement("div");
+  um.className = "msg user";
+  um.innerHTML = `<div class="who">你</div><div class="bubble">${esc(q)}</div>`;
+  $("stream").appendChild(um);
+  ta.value = ""; ta.style.height = "auto";
+  $("stream").scrollTop = $("stream").scrollHeight;
+  askStream(q);
+}
+
+// 初始化
+loadHealth(); loadStats(); loadAudit();
+setInterval(loadHealth, 15000);
+
+// 支持从 URL 带问题进来：?q=备付金是什么
+// 用途有二：① 分享链接时能直接带上问题（演示/复现 bug 都方便）；
+//          ② 无头浏览器截图时不用模拟点击。
+const presetQ = new URLSearchParams(location.search).get("q");
+if (presetQ) {
+  ta.value = presetQ;
+  ta.style.height = "auto";
+  ta.style.height = Math.min(ta.scrollHeight, 130) + "px";
+  setTimeout(send, 300);
+}
+</script>
+</body>
+</html>

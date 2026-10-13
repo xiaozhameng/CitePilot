@@ -1,0 +1,52 @@
+server:
+  port: 8090
+  # SSE 长连接：不要设太短的 idle-timeout，否则流式会被容器提前掐断
+  netty:
+    connection-timeout: 10s
+
+spring:
+  application:
+    name: citepilot-gateway
+  codec:
+    max-in-memory-size: 2MB
+
+gateway:
+  kernel:
+    base-url: ${CITEPILOT_KERNEL_URL:http://127.0.0.1:8077}
+    # 与内核 .env 里的 CITEPILOT_INTERNAL_TOKEN 必须一致
+    token: ${CITEPILOT_INTERNAL_TOKEN:dev-local-token-change-me}
+    connect-timeout: 3s
+    read-timeout: 60s
+    stream-idle-timeout: 45s
+    max-connections: 64
+
+  rate-limit:
+    enabled: true
+    # 桶容量 = 允许的突发；补充速率 = 稳态 QPS
+    burst: 6
+    refill-per-second: 0.5
+    # 真正保护内核的那道闸：内核单实例，并发 8 已是它的舒适区上限
+    max-concurrent-streams: 8
+
+  session:
+    max-turns: 20
+    idle-timeout: 30m
+    max-sessions: 500
+
+  audit:
+    enabled: true
+    path: var/gateway-audit.jsonl
+    memory-buffer: 200
+
+management:
+  endpoints:
+    web:
+      exposure:
+        include: health,info,metrics
+
+logging:
+  level:
+    root: INFO
+    com.citepilot.gateway: DEBUG
+    # WebClient 的 DEBUG 日志会把每次请求的完整 body 打出来，噪音太大
+    org.springframework.web.reactive.function.client: INFO

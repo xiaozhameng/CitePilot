@@ -1,0 +1,34 @@
+# 环境与密钥
+.env
+.venv/
+
+# 运行产物
+var/
+corpus/payment-handbook/chunks.jsonl
+corpus/payment-handbook/emb_cache/
+
+# ---- Java 网关 ----
+# Maven 编译产物。25MB 的 fat jar 提交进仓库没有任何意义，
+# 任何人 clone 之后 mvn package 一下就出来了。
+gateway/target/
+# 网关的运行时产物：审计日志（每答一次就多一行，会一直涨）
+gateway/var/
+*.class
+
+# 评测报告（本地跑出来的，每次数字可能不同）
+evals/report*.json
+
+# Python
+__pycache__/
+*.py[cod]
+.pytest_cache/
+.coverage
+htmlcov/
+*.egg-info/
+dist/
+build/
+
+# IDE / 系统
+.idea/
+.vscode/
+.DS_Store
