@@ -12,6 +12,17 @@
 > 上图：一次真实问答。回答里的 `[5]` `[2]` `[8]` 可以点开出处在下方卡片；
 > 右侧面板是这次请求的完整 trace（检索 457ms → 生成 3598ms，成本 ¥0.0055，引用校验 0 越界）。
 
+**想直接跑起来？** 不需要 API key，也不需要 Java，三条命令：
+
+```bash
+git clone https://github.com/xiaozhameng/CitePilot.git && cd CitePilot
+python3 -m venv .venv && .venv/bin/pip install -e .
+.venv/bin/python -m citepilot.cli build && .venv/bin/python -m citepilot.cli ask "备付金是什么？"
+```
+
+没有 key 时会自动降级成「原文摘录模式」——检索、引用、角标全部正常，只是答案由最相关的原文拼成。
+完整步骤（含演示页、依赖清单、出问题怎么查）见 [快速开始（从零到跑起来）](#快速开始从零到跑起来)。
+
 ---
 
 ## 为什么做这个
@@ -416,74 +427,173 @@ Python 的引用赋值本身是原子的，所以在途请求要么完整地用�
 
 ---
 
-## 快速开始
+## 快速开始（从零到跑起来）
 
-### 零、Java 工具链（只有跑网关时才需要）
+这一节按「别人刚 clone 下来」的视角写：每步都给命令，也给出**预期看到什么**。
+只想确认代码能跑，走路线 A，五分钟；想看完整演示页，再走路线 B。
 
-内核是 Python，只用命令行问答的话完全不需要 Java。要起网关（以及演示页）时才需要 JDK 21 + Maven。
+### 你需要什么
 
-先检查机器上有没有：
+| | 要求 | 没有会怎样 |
+|---|---|---|
+| **必需** | Python ≥ 3.11（开发用 3.13） | 装不了。先 `python3 --version` 看一眼 |
+| **必需** | git | clone 不了 |
+| 可选 | 一个 DeepSeek API key | **不影响跑起来**：自动降级成「原文摘录模式」，检索与引用照常，只是答案由最相关的原文段落拼成 |
+| 可选 | JDK 21 + Maven 3.9+ | 只影响演示页（Java 网关）。**只跑命令行问答完全不需要 Java** |
+| 可选 | SiliconFlow key（embedding / rerank） | 默认配置是 `bm25` + `none`，纯词频召回照样能用 |
+
+一句话：**这个项目在没有任何 key、也没装 Java 的机器上，同样能跑通并答出带引用的答案**，只是答案质量降一档。
+
+### 路线 A：只跑命令行（不需要 Java，约 5 分钟）
+
+**第 1 步：拿代码**
 
 ```bash
-java -version    # 应输出 openjdk version "21.x"
-mvn -v           # 应输出 Maven 3.9.x
+git clone https://github.com/xiaozhameng/CitePilot.git
+cd CitePilot
 ```
 
-都有就直接跳到「一」。没有的话两条路：
-
-- 把 JDK 21 和 Maven 装进系统 PATH（sdkman、brew 或官方安装包都行）；
-- 或者沿用本项目的约定：把免安装版解压到**与 CitePilot 平级的 `../.tools/`** 下，
-  `scripts/build.sh` 与 `scripts/dev.sh` 会自动探测并加载 `../.tools/env.sh`，
-  找不到才会退回系统 PATH —— 这也是为什么所有 Java 命令都收敛到了脚本里，
-  不要求你先配好 `PATH`。
-
-### 一、命令行（内核自带的 CLI）
-
-首次运行先建环境（Python ≥ 3.11，开发用的是 3.13；需要一个 DeepSeek key 和
-SiliconFlow 的 embedding / rerank key，键名见 `.env.example`）：
+**第 2 步：建环境**
 
 ```bash
-cd CitePilot
 python3 -m venv .venv
 .venv/bin/pip install -e .
-
-cp .env.example .env        # 把各个 *_API_KEY 填上
-.venv/bin/python -m citepilot.cli doctor
-.venv/bin/python -m citepilot.cli build
-.venv/bin/python -m citepilot.cli ask "备付金是什么？"
-.venv/bin/python -m citepilot.cli stats
 ```
 
-六条依次是：进入项目目录 → 复制一份配置（记得把 API Key 填进去）→ 体检（模型 / 向量 / 精排 / 语料）→ 切语料、建索引、生成评测集 → 问一个问题 → 查看 P95 延迟与成本统计。
+预期：约 1 分钟，装完不报错。这一步装的是 litellm / fastapi / jieba / pypdf / python-docx 等，
+**不需要先配任何 key**。
 
-### 二、起完整服务（内核 + Java 网关 + 演示页）
+**第 3 步：体检**
+
+```bash
+.venv/bin/python -m citepilot.cli doctor
+```
+
+预期（这是干净 clone 的真实输出，`未配置` 是正常的）：
+
+```
+┌────────────┬────────┬─────────────────────────────────────────────┐
+│ 组件       │ 状态   │ 说明                                        │
+├────────────┼────────┼─────────────────────────────────────────────┤
+│ 生成模型   │ 未配置 │ 将降级为原文摘录模式                        │
+│ Embedding  │ 降级   │ provider=bm25 未启用向量 → 自动走 BM25 单路 │
+│ Rerank     │ 未启用 │ RRF 名次直接当最终排序                      │
+│ 语料       │ ✓      │ index.html · 自测题 20 条 · 术语 39 条      │
+│ Chunk 索引 │ 未建   │ 先跑 build                                  │
+└────────────┴────────┴─────────────────────────────────────────────┘
+```
+
+**第 4 步：切语料建索引**（`chunks.jsonl` 是派生产物，不在仓库里，必须自己生成一次）
+
+```bash
+.venv/bin/python -m citepilot.cli build
+```
+
+预期：
+
+```
+语料切分完成：118 个 Chunk {'prose': 98, 'qa': 20}
+118 个 Chunk | BM25 ✓ | 向量 ✗（未启用）
+评测集已生成：57 条 → .../evals/goldenset.jsonl
+```
+
+**第 5 步：问第一个问题**
+
+```bash
+.venv/bin/python -m citepilot.cli ask "备付金是什么？"
+```
+
+没有 key 时预期（开头会明确告诉你这是降级）：
+
+```
+（降级为原文摘录模式：模型不可用，直接给出最相关的原文）
+
+定义 备付金 = 用户已经付了、但商户还没拿走的钱。……[1]
+```
+
+答案是**原文 + 角标**，角标就是引用。想换成模型生成的答案：
+
+```bash
+cp .env.example .env          # 已经存在就跳过
+# 编辑 .env，把 CITEPILOT_API_KEY 换成你自己的 DeepSeek key，然后重跑第 5 步
+```
+
+### 路线 B：起完整服务（内核 + 网关 + 演示页）
+
+JDK 21 与 Maven 装好之后（或者按下面「Java 工具链」的 `.tools` 约定），一条命令：
 
 ```bash
 ./start.sh
 ```
 
-一个脚本搞定：自动检查 `.env`、venv 和 jar（首次或改了 Java / 演示页会重新打包），
-然后前台起内核与网关。**按 Ctrl-C 或直接关掉终端窗口**都会把两个服务一起收走。
+`start.sh` 会自动做四件事，**这四件正好是干净 clone 后最容易漏的**：
 
-想手工分开起也可以（两个终端）：
+1. `.env` 不存在 → 从 `.env.example` 生成（不因为有占位符就退出）；
+2. `.venv` 不存在 → 建环境、装依赖；
+3. `corpus/payment-handbook/chunks.jsonl` 不存在 → 自动切语料（**漏了这步，内核启动直接 FileNotFoundError**）；
+4. 网关 jar 不存在或 Java 源码更新过 → 自动重新打包。
 
-```bash
-./scripts/build.sh        # 只在首次、或改了 Java / static/ 之后需要
-./scripts/dev.sh          # 内核 + 网关一起起
+预期输出（真实日志，节选）：
+
+```
+! 已从 .env.example 生成 .env
+! CITEPILOT_API_KEY 未填 —— 本次以「原文摘录模式」启动：
+· 首次运行，切分内置语料…
+切出 118 个 Chunk → .../corpus/payment-handbook/chunks.jsonl
+· 打包网关（首次运行或 Java 代码有改动）…
+· 内核 :8077  ·  网关 :8090
+──── 1/2 启动内核 ────
+✓ 内核就绪
+──── 2/2 启动网关 ────
+Started GatewayApplication in 1.668 seconds
 ```
 
-打开 **http://127.0.0.1:8090/** 就是演示页：左侧问答、右侧实时看链路耗时瀑布 / 聚合指标 / 审计流水；顶部可以现场切换召回策略与精排开关，直接做对照实验。
-右侧最上面是**知识库面板** —— 把 md / txt / html / pdf / docx 拖进去，它会自动重建索引，然后立刻就能问这份文档里的内容。试着传一份自己的文件，问一个只有那份文件才知道的问题。
+然后打开 **http://127.0.0.1:8090/**。**Ctrl-C 或直接关掉终端窗口**，两个服务一起收走，不留孤儿进程。
 
-也可以分开起（两个终端）：
+演示页能做什么：左侧问答；右侧实时链路耗时瀑布、聚合指标、审计流水；顶部可现场切换召回策略与精排开关做对照实验；
+右上角**知识库面板**支持把 md / txt / html / pdf / docx 拖进去，自动重建索引，立刻可问。
+
+想自己控制每个环节，也可以分步来：
+
 ```bash
-./scripts/kernel.sh
-./scripts/gateway.sh
+./scripts/build.sh     # 只打包网关（首次、或改了 Java / static 之后）
+./scripts/dev.sh       # 内核 + 网关一起起
+./scripts/kernel.sh    # 只起内核（:8077）
+./scripts/gateway.sh   # 只起网关（:8090）
 ```
 
-第一条起 Python 内核（:8077），第二条起 Java 网关（:8090）。
+### 验证它真的在工作
 
-### 三、评测与测试
+```bash
+curl -s --noproxy '*' http://127.0.0.1:8090/api/health
+```
+
+预期能看到 `"ok":true`、`"index":"118 个 Chunk | BM25 ✓"`，以及
+`"llm":{"configured":false}`（没填 key 时就是 false，属于正常）。
+
+再问一句：
+
+```bash
+curl -s --noproxy '*' -X POST http://127.0.0.1:8090/api/ask \
+  -H 'Content-Type: application/json' \
+  -d '{"question":"备付金是什么？"}'
+```
+
+流式版把路径换成 `/api/ask/stream`，加 `-N` 就能看到逐事件推送。
+
+### Java 工具链（只有路线 B 需要）
+
+```bash
+java -version    # 需要 21.x
+mvn -v           # 需要 3.9.x
+```
+
+两条路：装进系统 PATH（sdkman / brew / 官方包都行）；或者沿用本项目的约定 ——
+把免安装版解压到**与 CitePilot 平级的 `../.tools/`**，`scripts/build.sh` 与
+`scripts/gateway.sh` 会自动探测并 `source ../.tools/env.sh`，找不到才回退系统 PATH。
+所以 Java 命令都收敛进了脚本，**不要求你先配好 `PATH`**。
+
+### 评测与测试
 
 ```bash
 PYTHONPATH=src .venv/bin/python evals/run_eval.py
@@ -493,25 +603,24 @@ PYTHONPATH=src .venv/bin/python evals/build_hardset.py 15
 .venv/bin/python -m pytest tests -q --cov=citepilot
 ```
 
-前两条跑术语式评测集（第二条换成口语化难样本）；第三条用 LLM 把术语式提问改写成口语化问法，生成难样本；最后一条跑单元测试。
+前两条跑术语式评测集（第二条换口语化难样本）；第三条用 LLM 把术语式提问改写成口语化问法，生成难样本；
+最后一条跑单元测试。**注意：`test_ingest.py` 在语料文件缺失时会整组 skip**，
+所以先做完路线 A 的第 4 步再看测试结果。
 
-### 四、直接调 HTTP 接口
+### 出问题怎么查
 
-非流式：
-
-```bash
-curl -s -X POST http://127.0.0.1:8090/api/ask \
-  -H 'Content-Type: application/json' \
-  -d '{"question":"备付金是什么？"}' | python -m json.tool
-```
-
-流式（SSE，逐事件推送）：
-
-```bash
-curl -N -X POST http://127.0.0.1:8090/api/ask/stream \
-  -H 'Content-Type: application/json' \
-  -d '{"question":"备付金是什么？"}'
-```
+| 现象 | 原因 | 怎么办 |
+|---|---|---|
+| `FileNotFoundError: ...chunks.jsonl` | 没有切语料就起了服务 | 跑 `cli build`，或直接用 `./start.sh`（它会自动切） |
+| `CITEPILOT_API_KEY 未填`（黄色警告） | 没配 key | 正常，降级为摘录模式；填 key 后重启即为生成式回答 |
+| `找不到 mvn` / `mvn: command not found` | 没装 Maven | 见上一节；只想跑命令行的话不用管 |
+| `Port 8090 was already in use` | 端口被占（常见于上次没退干净） | `lsof -ti tcp:8090 \| xargs kill`，或 `GATEWAY_PORT=8091 ./start.sh` |
+| 网关日志里 `Unable to load ...MacOSDnsServerAddressStreamProvider`（ERROR） | netty 的 macOS DNS 原生库没打进来 | **无害**，已自动回退系统 DNS |
+| `LiteLLM:WARNING ... model cost map fetch ... failed` | 拉价格表失败（离线 / 网络限制） | **无害**，自动使用内置备份 |
+| 内核日志里 `GET /health 401 Unauthorized` | `dev.sh` 的健康探测不带内部 token | **正常现象**，能返回 401 就说明服务已就绪 |
+| 演示页打开是 404 / 空白 | 网关没起来（jar 没打包或打失败） | 看 `/tmp/citepilot-build.log`，再跑 `./scripts/build.sh` |
+| `pip install` 报 `EEXIST` / 超时 | 临时目录残留或网络慢 | 重试；或 `.venv/bin/pip install -e . -i https://pypi.tuna.tsinghua.edu.cn/simple` |
+| 问答返回 401 | 网关与内核的 `CITEPILOT_INTERNAL_TOKEN` 不一致 | 改 `.env` 里的值后**同时重启两个服务** |
 
 ---
 
