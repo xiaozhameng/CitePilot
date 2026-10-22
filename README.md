@@ -7,6 +7,11 @@
 它不是"调个 API 套个壳"的 RAG demo，而是一条完整链路：
 三档意图分流 → 双路召回 → RRF 融合 → 精排 → **自纠正重检** → 带引用生成 → 引用校验 → 全链路 trace → 评测回归。
 
+![CitePilot 演示：带角标的回答、可点开的出处卡片、右侧全链路 trace](docs/screenshots/answer.png)
+
+> 上图：一次真实问答。回答里的 `[5]` `[2]` `[8]` 可以点开出处在下方卡片；
+> 右侧面板是这次请求的完整 trace（检索 457ms → 生成 3598ms，成本 ¥0.0055，引用校验 0 越界）。
+
 ---
 
 ## 为什么做这个
@@ -283,32 +288,32 @@ Python 的引用赋值本身是原子的，所以在途请求要么完整地用�
 
 内核是 Python，只用命令行问答的话完全不需要 Java。要起网关（以及演示页）时才需要 JDK 21 + Maven。
 
-这套工具链是免安装 tar 包解出来的，放在 `Agent/.tools/`（与 CitePilot 平级），不依赖 brew。
-`~/.zshrc` 里已配好自动加载，**新开一个终端窗口**就能直接用：
+先检查机器上有没有：
 
 ```bash
-java -version
-mvn -v
+java -version    # 应输出 openjdk version "21.x"
+mvn -v           # 应输出 Maven 3.9.x
 ```
 
-分别应输出 `openjdk version "21.0.12.1"` 与 `Apache Maven 3.9.9`。
+都有就直接跳到「一」。没有的话两条路：
 
-如果当前这个终端还没有（例如 `.zshrc` 是刚改的），手动加载一次即可，任何目录下都能执行：
-
-```bash
-source ~/Desktop/AI软件开发/Agent/.tools/env.sh
-```
-
-这会把 `JAVA_HOME` 与 `PATH` 设进当前这个 shell。
-
-想完全不动 `.zshrc` 也行 —— 下面的 `scripts/build.sh` 与 `scripts/dev.sh` 会自己加载工具链，
-不要求你先配好 PATH。这也是为什么所有 Java 相关命令都收敛到了脚本里。
+- 把 JDK 21 和 Maven 装进系统 PATH（sdkman、brew 或官方安装包都行）；
+- 或者沿用本项目的约定：把免安装版解压到**与 CitePilot 平级的 `../.tools/`** 下，
+  `scripts/build.sh` 与 `scripts/dev.sh` 会自动探测并加载 `../.tools/env.sh`，
+  找不到才会退回系统 PATH —— 这也是为什么所有 Java 命令都收敛到了脚本里，
+  不要求你先配好 `PATH`。
 
 ### 一、命令行（内核自带的 CLI）
 
+首次运行先建环境（Python ≥ 3.11，开发用的是 3.13；需要一个 DeepSeek key 和
+SiliconFlow 的 embedding / rerank key，键名见 `.env.example`）：
+
 ```bash
 cd CitePilot
-cp .env.example .env
+python3 -m venv .venv
+.venv/bin/pip install -e .
+
+cp .env.example .env        # 把各个 *_API_KEY 填上
 .venv/bin/python -m citepilot.cli doctor
 .venv/bin/python -m citepilot.cli build
 .venv/bin/python -m citepilot.cli ask "备付金是什么？"
