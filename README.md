@@ -194,7 +194,7 @@
          └── split.py      切分公共设施（章节装配 · 短块合并）
               ↓
 底座     SQLite（会话 / trace / 评测）+ embedding 缓存（按单条文本 sha1）
-         内置语料 corpus/  ·  上传文档 data/kb/（两者都不进 git）
+         内置语料 corpus/（index.html 进 git，切分产物不进） · 上传文档 data/kb/（整个不进）
          DeepSeek（生成）· bge-m3（向量）· bge-reranker（精排）
 ```
 
@@ -206,6 +206,140 @@
 1. **内核扩不了副本。** 它是单进程有状态的（内存里放着 118 条向量 + BM25 索引），前面必须有东西挡流量，否则并发一上来延迟就一起崩。
 2. **职责不能混。** 鉴权、配额、会话属于"服务"层面的事，塞进内核会让它越来越难测 —— 内核应该只关心"答得对不对"。
 3. **内核会被换掉。** 换模型、换检索库、甚至换语言，只要网关这条边界在，调用方一行都不用改。
+
+---
+
+## 项目结构
+
+先看整棵树。看完它，你应该能回答两个问题：**哪些东西会随仓库发给别人，哪些只在你本机存在** —— 在这个项目里，这个区分比目录名本身重要，因为它决定了"别人 clone 下来能不能直接跑"。
+
+```
+CitePilot/
+├── start.sh                      一键启动：内核 + 网关，前台阻塞，Ctrl-C 全停
+├── pyproject.toml                依赖与入口（pip install -e . 后得到 citepilot 命令）
+├── .env.example                  配置模板；真正的 .env 不进仓库
+│
+├── src/citepilot/                Python 内核 —— 所有问答逻辑都在这里
+│   ├── server.py                 内核对外的唯一入口（HTTP + SSE）
+│   ├── cli.py                    命令行入口（ask / serve / ingest / eval）
+│   ├── agent.py                  主循环：分流 → 检索 → 裁判 → 重检 → 生成
+│   ├── intent.py                 三档意图分流（规则 → LLM 分类 → 兜底澄清）
+│   ├── retriever.py              两路召回 → 去重 → RRF → 精排 → Top-K
+│   ├── index.py                  BM25 + 向量双路索引，支持原子热替换
+│   ├── bm25.py                   纯 Python BM25（零依赖的稀疏检索兜底）
+│   ├── embed.py                  Embedding 客户端（一套接口，三套实现）
+│   ├── fusion.py                 RRF 融合
+│   ├── judge.py                  充分性裁判 + 忠实度打分（LLM-as-judge）
+│   ├── answer.py                 带引用生成 + 引用校验 + 摘录降级
+│   ├── llm.py                    LLM 客户端：统一出口 + 分类重试 + token 记账
+│   ├── ingest.py                 语料管线：把电子书 HTML 切成 Chunk
+│   ├── kb.py                     上传知识库：五格式抽取 → 切分 → 落盘 → 增删
+│   ├── split.py                  切分公共设施（被 ingest 与 kb 共用）
+│   ├── schema.py                 统一数据结构；引用锚点在这里生成
+│   ├── trace.py                  每轮链路落 SQLite（演示页右侧面板的数据源）
+│   ├── evalkit.py                评测集构建 + 检索指标
+│   └── config.py                 配置：只从环境变量与 .env 读
+│
+├── gateway/                      Java 网关 —— 只管接入，不含任何问答逻辑
+│   ├── pom.xml
+│   └── src/main/
+│       ├── java/com/citepilot/gateway/
+│       │   ├── GatewayApplication.java
+│       │   ├── controller/       ChatController · KbController · MetaController
+│       │   ├── service/          KernelClient · RateLimiter · SessionStore · AuditLog
+│       │   ├── config/           GatewayProperties · WebClientConfig · StaticResourceConfig
+│       │   └── model/            AskRequest
+│       └── resources/
+│           ├── application.yml   网关配置（全部可被环境变量覆盖）
+│           └── static/index.html 演示页；纯静态，无前端构建步骤
+│
+├── tests/                        pytest 单测（8 个测试文件 + conftest + fixtures）
+├── evals/                        评测集与对照实验脚本
+├── scripts/                      kernel.sh · gateway.sh · dev.sh · build.sh
+├── docs/screenshots/             README 首图
+│
+├── corpus/payment-handbook/      内置语料（那本支付手册）
+│   ├── index.html                唯一的语料源，412K，同时被当作原文网页托管
+│   └── chunks.jsonl              切分产物（118 块）；不进 git，可由上者重建
+│
+├── data/kb/                      用户上传的知识库 + 清单
+├── var/                          SQLite / embedding 缓存 / 临时文件
+└── gateway/target/               Maven 产物（25MB fat jar）
+```
+
+这张树里，**只有 `data/kb/`、`var/`、`gateway/target/` 和 `corpus/payment-handbook/chunks.jsonl` 不进仓库**，其余全部随 git 分发。`corpus/payment-handbook/index.html` 看似只是个演示文件，但它进 git 是有原因的：`chunks.jsonl` 是它的派生产物且被 ignore，所以它就是仓库里唯一的语料源，删掉它，clone 下来的人连索引都建不出来。
+
+### 内核：19 个模块，按职责分四组
+
+读这套代码的顺序建议就是下面这个顺序 —— 从入口往里走，不要从 `agent.py` 开始硬啃。
+
+| 分组 | 文件 | 职责 | 值得知道的一点 |
+|---|---|---|---|
+| **入口与编排** | `server.py` | 内核对外的唯一入口 | 流式端点用同步 `def`，让 FastAPI 丢线程池跑，否则阻塞调用会把事件循环卡死 |
+| | `cli.py` | 命令行入口 | 用 argparse 不用 Typer，少一个依赖 |
+| | `agent.py` | 主循环，整个项目的枢纽 | 三道防死循环刹车；每轮都产出 trace 事件 |
+| **理解问题** | `intent.py` | 三档分流：规则 → LLM 分类 → 兜底 | 兜底是**反问**，不是猜一个意图 |
+| | `judge.py` | 充分性裁判 + 忠实度打分 | 两个用途共用一个实现，都走"给结构和判据"的提示词 |
+| **检索** | `retriever.py` | 召回 → 去重 → RRF → 精排 → Top-K | 精排默认关闭，开了要额外付费 |
+| | `index.py` | BM25 + 向量双路索引 | 内置语料与上传文档在这里合并；热替换靠一次引用赋值 |
+| | `bm25.py` | 纯 Python BM25 | 自己写是因为它只有 30 行、且是**降级底座**：向量服务挂了、断网了，这条路必须在 |
+| | `embed.py` | Embedding 客户端 | 三个实现：`bm25`（不算向量）/ `ollama`（本地）/ `siliconflow`（云），配置一行切换 |
+| | `fusion.py` | RRF 融合 | 只用排名不用分数，避免两路分数量纲打架 |
+| **生成与引用** | `answer.py` | 生成 + 引用校验 + 摘录降级 | 校验不通过的句子不硬编，降级成摘录；"答案必带出处"的最后一道防线 |
+| | `llm.py` | LLM 客户端 | litellm 之上再包一层：分类重试、token 记账、超时 |
+| **数据与观测** | `ingest.py` | 电子书 → Chunk | 顺带抽出自测题与术语，作为评测集原料 |
+| | `kb.py` | 上传知识库 | 0 个块就回滚，不留幽灵记录 |
+| | `split.py` | 切分公共设施 | 章节装配、短块合并 |
+| | `schema.py` | 数据结构 | 锚点拼接逻辑在这里，不在前端 |
+| | `trace.py` | 链路落库 | 演示页 trace 面板只读它 |
+| | `evalkit.py` | 评测工具 | README 里的 Recall@K / MRR 都由它算 |
+| | `config.py` | 配置 | 代码里零硬编码密钥，缺 key 时自动降级成抽取式回答 |
+
+### 网关：12 个类，一个类只干一件事
+
+| 包 | 文件 | 职责 |
+|---|---|---|
+| 根 | `GatewayApplication` | Spring Boot 启动类 |
+| `controller` | `ChatController` | `/api/ask`（非流式）、`/api/ask/stream`（SSE 透传，逐块转发不攒） |
+| | `KbController` | `/api/kb/**`：上传、列表、删除、重建、取原文 |
+| | `MetaController` | `/api/health`、`/api/stats`、`/api/recent`、`/api/sessions` |
+| `service` | `KernelClient` | **整个网关唯一真的发 HTTP 出去的地方**；内核要换地址只改这里 |
+| | `RateLimiter` | 两道闸：令牌桶管速率、信号量管并发 |
+| | `SessionStore` | 会话归属、轮次记录、LRU 淘汰 |
+| | `AuditLog` | 每轮问答落一条 JSONL |
+| `config` | `GatewayProperties` | 全部配置项，yml 写、环境变量覆盖 |
+| | `WebClientConfig` | 上游 HTTP 客户端（超时、缓冲、编解码） |
+| | `StaticResourceConfig` | 把 `corpus/` 挂到 `/corpus/**`；目录不存在只 WARN 不拦启动 |
+| `model` | `AskRequest` | 请求体 |
+
+### 代码之外的四个目录
+
+| 路径 | 是什么 | 删了会怎样 |
+|---|---|---|
+| `tests/` | 单测，覆盖切分、融合、意图、引用校验、知识库、流式、冒烟 | 失去回归保护。注意：语料相关用例现在是 `skipif`，缺语料会"静默变绿"而不是报错 |
+| `evals/` | `goldenset.jsonl`（57 条）+ `goldenset_hard.jsonl`（15 条）+ `run_eval.py` | README 里那些 Recall 数字再也复现不了 |
+| `scripts/` | 四个脚本：`kernel.sh` / `gateway.sh` / `dev.sh` / `build.sh` | `start.sh` 直接不可用 |
+| `docs/screenshots/` | 首图（800K PNG） | README 图片裂开，功能无影响 |
+
+### 两条最容易搞混的边界
+
+**`corpus/` 与 `data/kb/` 都是"资料"，但不是一回事。**
+
+| | `corpus/payment-handbook/` | `data/kb/` |
+|---|---|---|
+| 谁的资料 | 项目自带的演示语料 | 用户自己上传的 |
+| 进 git 吗 | `index.html` 进，`chunks.jsonl` 不进 | 整个不进 |
+| 引用锚点 | `corpus/payment-handbook/index.html#ch-03`，指向真实网页 | `/v1/kb/documents/{id}/raw?chunk=...`，指向取原文接口 |
+| 由谁托管 | 网关静态资源 `/corpus/**` | 网关转发到内核 |
+| 删掉的后果 | **clone 后建不出索引**，角标全 404 | 只是丢了自己的文档，重新上传即可 |
+
+**`var/` 与 `data/` 都是"运行时写出来的"，但性质不同。** `var/` 是可丢弃的派生状态（SQLite、向量缓存、临时文件），删了自动重建；`data/` 里是**用户的原始输入**，删了就没有了。所以备份只备份 `data/`，`var/` 从来不用管。
+
+### 为什么这样分
+
+1. **内核与界面分离**（`src/` vs `gateway/`）。内核只有一种对外形态：HTTP + SSE。命令行、演示页、将来的手机端都是薄客户端。所以加一个客户端不需要动内核一行代码 —— 这是第一天就定下的，不是后来重构出来的。
+2. **代码与数据分离**（`src/` vs `corpus/` `data/` `var/`）。换语料、清缓存、清会话历史，都不应该碰到代码；反过来，升级代码也不应该让用户资料有风险。
+3. **可复现的数字必须和语料一起进仓库**。README 里的 Recall@1 0.895 来自 `evals/` + `corpus/index.html` 这一对，缺任何一半，这个数字就变成不可验证的宣传。
 
 ---
 
