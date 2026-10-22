@@ -22,7 +22,7 @@ import com.citepilot.gateway.config.GatewayProperties;
  *       只要网关这条边界在，换内核不影响任何调用方。</li>
  * </ul>
  *
- * <p>实践里能对着这套说法讲的是「编排与运行」「生产化」两块能力：
+ * <p>这套结构对应的两块能力是「编排与运行」与「生产化」：
  * 网关是"把模型能力变成可上线服务"的那一层。
  */
 @SpringBootApplication

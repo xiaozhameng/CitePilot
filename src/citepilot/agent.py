@@ -8,7 +8,7 @@
 普通 RAG 是一条直线，检索到什么就生成什么；Agent 会自己判断
 "我这回捞到的东西够不够"，不够就换个说法再捞一次。
 这个"判断 + 回头"就是 ReAct 里 Thought → Action → Observation 的最小形态，
-也是Agent Loop「Agent Loop 怎么防死循环、防无限工具调用」要讲的东西。
+也是「Agent Loop 怎么防死循环、防无限工具调用」的关键所在。
 
 防死循环靠三道刹车（都在下面的代码里）：
   1) 硬性轮次上限 max_rewrite（默认 2），数满即停
